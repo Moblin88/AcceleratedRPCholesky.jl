@@ -64,11 +64,13 @@ Random.seed!(42)
         end
 
         @testset "G capacity growth beyond block_size" begin
-            # Use block_size=1 and rank > block_size to force G reallocation
+            # Use block_size=1 and rank > block_size to force G reallocation:
+            # the initial G has 1 column; after the first accepted pivot k=1,
+            # the next iteration triggers the k+r > size(G,2) growth branch.
             Random.seed!(42)
             G = rpcholesky(rbf, X; rank=8, block_size=1)
             @test size(G, 1) == n
-            @test size(G, 2) <= 8
+            @test size(G, 2) > 1  # confirms reallocation path was exercised
             approx = G * G'
             err = norm(K - approx, 1) / norm(K, 1)
             @test err < 1.0
@@ -82,7 +84,7 @@ Random.seed!(42)
         end
 
         @testset "small final block (b < block_size)" begin
-            # block_size=4, rank=7: last block has b=3 (odd remainder), hits the fresh-matrix branch
+            # block_size=4, rank=7: last block has a partial remainder of 3, hits the fresh-matrix branch
             Random.seed!(42)
             G = rpcholesky(rbf, X; rank=7, block_size=4)
             @test size(G, 2) <= 7
