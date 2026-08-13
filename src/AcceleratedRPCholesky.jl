@@ -105,13 +105,14 @@ function rpcholesky(
 
     trace0 = sum(d)
     trace0 <= 0.0 && return Matrix{Float64}(undef, n, 0)
+    trace_mass = trace0
 
     G     = Matrix{Float64}(undef, n, block_size)
     k     = 0
     H_buf = Matrix{Float64}(undef, block_size, block_size)
 
     while k < max_rank
-        sum(d) <= rtol * trace0 && break
+        trace_mass <= rtol * trace0 && break
 
         b = min(block_size, max_rank - k)
 
@@ -171,10 +172,16 @@ function rpcholesky(
         end
         rdiv!(G_new_cols, LowerTriangular(L)')
 
-        # Phase 5 — update residual diagonal
-        for l in 1:r
-            col = view(G, :, k + l)
-            @. d = max(d - col * col, 0.0)
+        # Phase 5 — update residual diagonal and residual trace mass
+        trace_mass = 0.0
+        @inbounds for i in 1:n
+            dᵢ = d[i]
+            for l in 1:r
+                dᵢ -= abs2(G_new_cols[i, l])
+            end
+            dᵢ = max(dᵢ, 0.0)
+            d[i] = dᵢ
+            trace_mass += dᵢ
         end
 
         k += r
@@ -184,4 +191,3 @@ function rpcholesky(
 end
 
 end # module AcceleratedRPCholesky
-

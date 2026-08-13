@@ -47,6 +47,14 @@ Random.seed!(42)
             G_loose = rpcholesky(rbf, X; rank=n, rtol=0.9)
             @test size(G_loose, 2) <= size(G_tight, 2)
         end
+
+        @testset "residual trace tolerance" begin
+            Random.seed!(42)
+            rtol = 0.2
+            G = rpcholesky(rbf, X; rank=n, rtol=rtol, block_size=4)
+            residual = K - G * G'
+            @test tr(Symmetric(residual)) <= rtol * tr(Symmetric(K)) + 1e-8
+        end
     end
 
 end
