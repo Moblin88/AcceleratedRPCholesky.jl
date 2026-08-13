@@ -25,29 +25,6 @@ using StatsBase: sample, Weights
 export rpcholesky, rpcholesky_kernel
 
 # ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-# Symmetric rank-1 update: A -= v * v'
-# For BLAS-native types (Float32/Float64) delegates to BLAS.syr! (fast path).
-# Falls back to a generic upper-triangle loop for other Real types.
-function _sym_rank1_downdate!(A::AbstractMatrix{T}, v::AbstractVector{T}) where {T <: BLAS.BlasReal}
-    BLAS.syr!('U', -one(T), v, A)
-    LinearAlgebra.copytri!(A, 'U')
-end
-
-function _sym_rank1_downdate!(A::AbstractMatrix{T}, v::AbstractVector{T}) where {T <: Real}
-    n = length(v)
-    @inbounds for j in 1:n
-        vj = v[j]
-        for i in 1:j
-            A[i, j] -= v[i] * vj
-            A[j, i] = A[i, j]
-        end
-    end
-end
-
-# ---------------------------------------------------------------------------
 # Algorithm 2.1 — RejectionCholesky
 # ---------------------------------------------------------------------------
 
@@ -89,10 +66,12 @@ function _rejection_cholesky!(H::Matrix{T}) where {T<:Real}
             lj .= view(H, j:b, j) .* inv_sqrt_hjj
 
             # Schur complement update: H[j+1:b, j+1:b] -= lj_tail * lj_tail'
+            # 5-arg mul! dispatches to BLAS.ger! for Float32/Float64 with no
+            # intermediate allocation; falls back to a generic loop otherwise.
             if j < b
                 lj_tail = view(L_scratch, j+1:b, j)
                 H_sub   = view(H, j+1:b, j+1:b)
-                _sym_rank1_downdate!(H_sub, lj_tail)
+                mul!(H_sub, lj_tail, lj_tail', -one(T), one(T))
             end
         end
         # If rejected: H is NOT updated — the diagonal H[j,j] for later pivots
