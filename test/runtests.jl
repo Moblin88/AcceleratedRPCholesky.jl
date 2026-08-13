@@ -12,15 +12,14 @@ Random.seed!(42)
         A_raw = randn(n, n)
         A = A_raw * A_raw' + n * I  # well-conditioned PSD
 
-        @testset "returns CholeskyPivoted" begin
+        @testset "returns RPCholeskyResult" begin
             F = rpcholesky(A; rank=5)
-            @test F isa CholeskyPivoted
+            @test F isa RPCholeskyResult
         end
 
         @testset "low rank approximation quality" begin
             F = rpcholesky(A; rank=n, rtol=1e-6)
-            L = F.factors[:, 1:F.rank]
-            approx = L * L'
+            approx = F.G * F.G'
             err = norm(A - approx) / norm(A)
             @test err < 0.5
         end
@@ -39,18 +38,18 @@ Random.seed!(42)
 
         @testset "block_size parameter accepted" begin
             F = rpcholesky(A; rank=5, block_size=2)
-            @test F isa CholeskyPivoted
+            @test F isa RPCholeskyResult
         end
 
         @testset "rank defaults to n" begin
             F = rpcholesky(A; rtol=1e-10)
-            @test size(F.factors, 1) == n
+            @test size(F.G, 1) == n
         end
 
-        @testset "p contains pivot indices" begin
+        @testset "piv contains pivot indices" begin
             F = rpcholesky(A; rank=5)
-            @test length(F.p) == n
-            @test sort(F.p) == collect(1:n)
+            @test length(F.piv) == F.rank
+            @test all(1 .<= F.piv .<= n)
         end
     end
 
@@ -100,23 +99,20 @@ Random.seed!(42)
             A = v * v'
             F = rpcholesky(A; rank=1, rtol=0.0)
             @test F.rank >= 1
-            L = F.factors[:, 1:F.rank]
-            @test norm(A - L*L') / norm(A) < 0.01
+            @test norm(A - F.G * F.G') / norm(A) < 0.01
         end
 
         @testset "identity matrix full rank" begin
             A = Matrix{Float64}(I, 5, 5)
             F = rpcholesky(A; rtol=1e-10)
-            L = F.factors[:, 1:F.rank]
-            approx = L * L'
+            approx = F.G * F.G'
             @test norm(A - approx) / norm(A) < 0.1
         end
 
         @testset "2x2 PSD matrix" begin
             A = [4.0 2.0; 2.0 3.0]
             F = rpcholesky(A; rank=2, rtol=0.0)
-            L = F.factors[:, 1:F.rank]
-            @test norm(A - L*L') / norm(A) < 0.01
+            @test norm(A - F.G * F.G') / norm(A) < 0.01
         end
     end
 end

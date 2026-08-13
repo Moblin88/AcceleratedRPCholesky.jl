@@ -22,7 +22,27 @@ module RPCholesky
 using LinearAlgebra
 using StatsBase: sample, Weights
 
-export rpcholesky, rpcholesky_kernel
+export rpcholesky, rpcholesky_kernel, RPCholeskyResult
+
+# ---------------------------------------------------------------------------
+# Result type
+# ---------------------------------------------------------------------------
+
+"""
+    RPCholeskyResult{T}
+
+Result of [`rpcholesky`](@ref).
+
+# Fields
+- `G   :: Matrix{T}` — `n × k` low-rank factor; `G * G' ≈ A`.
+- `piv :: Vector{Int}` — the `k` pivot indices selected by the algorithm.
+- `rank :: Int` — number of columns `k` in `G`.
+"""
+struct RPCholeskyResult{T}
+    G    :: Matrix{T}
+    piv  :: Vector{Int}
+    rank :: Int
+end
 
 # ---------------------------------------------------------------------------
 # Algorithm 2.1 — RejectionCholesky
@@ -204,15 +224,15 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    rpcholesky(A; rank=n, rtol=0.05, block_size) -> CholeskyPivoted
+    rpcholesky(A; rank=n, rtol=0.05, block_size) -> RPCholeskyResult
 
 Compute an Accelerated Randomly Pivoted Cholesky low-rank approximation of the
 `n × n` symmetric positive semidefinite matrix `A`.
 
-Returns a `CholeskyPivoted` object `F` where:
+Returns an [`RPCholeskyResult`](@ref) `F` where:
 - `F.rank` is the number of columns `k` of the computed factor.
-- `F.factors[:, 1:F.rank]` is the `n × k` factor `G` satisfying `G * G' ≈ A`.
-- `F.p[1:F.rank]` contains the selected pivot indices.
+- `F.G` is the `n × k` factor satisfying `F.G * F.G' ≈ A`.
+- `F.piv` contains the `k` selected pivot indices.
 
 The algorithm (Algorithm 2.2 of Epperly et al., 2024) stops when:
 1. `k == rank` (if `rank` is given), **or**
@@ -227,8 +247,7 @@ The algorithm (Algorithm 2.2 of Epperly et al., 2024) stops when:
 # Example
 ```julia
 F = rpcholesky(A; rank=20, rtol=0.05)
-G = F.factors[:, 1:F.rank]   # n × k low-rank factor
-approx = G * G'               # ≈ A
+approx = F.G * F.G'   # ≈ A
 ```
 
 # References
@@ -254,15 +273,7 @@ function rpcholesky(
     G, k = _accelerated_rpcholesky_core!(
         G, piv, d, get_submatrix!, get_columns!, n, max_rank, T(rtol), bs)
 
-    # Embed the n × k factor in an n × n matrix for CholeskyPivoted metadata.
-    # NOTE: G is NOT lower-triangular in general (RPCholesky selects random pivots),
-    # so use `F.factors[:, 1:F.rank]` to retrieve the actual factor, not `F.L`.
-    factors = zeros(T, n, n)
-    k > 0 && (factors[:, 1:k] .= view(G, :, 1:k))
-
-    jpvt = vcat(piv, setdiff(1:n, piv))
-    return CholeskyPivoted{T, Matrix{T}, Vector{Int}}(
-        factors, 'L', jpvt, k, T(rtol), 0)
+    return RPCholeskyResult{T}(G[:, 1:k], piv, k)
 end
 
 """

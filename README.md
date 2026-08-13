@@ -26,9 +26,8 @@ A_raw = randn(n, n)
 A = A_raw * A_raw' + n * I   # symmetric PSD
 
 # Approximate with rank ≤ 20, stopping when residual trace < 5% of original
-F = rpcholesky(A; rank=20, rtol=0.05)   # returns CholeskyPivoted
-L = F.factors[:, 1:F.rank]
-println("Approximation error: ", norm(A - L*L') / norm(A))
+F = rpcholesky(A; rank=20, rtol=0.05)   # returns RPCholeskyResult
+println("Approximation error: ", norm(A - F.G * F.G') / norm(A))
 ```
 
 ### Kernel interface
@@ -40,37 +39,40 @@ X = randn(500, 4)   # 500 observations, 4 features
 
 rbf(x, y) = exp(-sum((x .- y).^2) / 2.0)
 
-# Returns n × k lower factor L such that L*L' ≈ K (kernel matrix)
-L = rpcholesky_kernel(rbf, X; rank=30, rtol=0.05)
+# Returns n × k factor G such that G*G' ≈ K (kernel matrix)
+G = rpcholesky_kernel(rbf, X; rank=30, rtol=0.05)
 ```
 
 ## API
 
-### `rpcholesky(A; rank=nothing, rtol=0.05, block_size=nothing)`
+### `rpcholesky(A; rank=n, rtol=0.05, block_size=clamp(√n, 4, 256))`
 
-Compute a low-rank Cholesky factor for a symmetric PSD matrix `A`.
+Compute a low-rank factor for a symmetric PSD matrix `A`.
 
-| Parameter    | Default    | Description                                              |
-|-------------|------------|----------------------------------------------------------|
-| `rank`       | `nothing`  | Maximum rank. `nothing` means up to `n`.                 |
-| `rtol`       | `0.05`     | Stop when residual trace ≤ `rtol × tr(A)`.              |
-| `block_size` | `√n`       | Number of pivots sampled per block iteration.            |
+| Parameter    | Default              | Description                                           |
+|--------------|----------------------|-------------------------------------------------------|
+| `rank`       | `n`                  | Maximum rank.                                         |
+| `rtol`       | `0.05`               | Stop when residual trace ≤ `rtol × tr(A)`.           |
+| `block_size` | `clamp(√n, 4, 256)`  | Number of pivot candidates sampled per iteration.     |
 
-Returns a `CholeskyPivoted` object `F`; use `F.factors[:, 1:F.rank]` for the `n × k` low-rank factor `L` such that `L * L' ≈ A`.
+Returns an `RPCholeskyResult` `F` with fields:
+- `F.G` — `n × k` factor; `F.G * F.G' ≈ A`.
+- `F.piv` — `k`-vector of selected pivot indices.
+- `F.rank` — number of accepted pivots `k`.
 
-### `rpcholesky_kernel(kernel, X; rank=nothing, rtol=0.05, block_size=nothing)`
+### `rpcholesky_kernel(kernel, X; rank=n, rtol=0.05, block_size=clamp(√n, 4, 256))`
 
-Compute a low-rank Cholesky factor for the kernel matrix induced by `kernel` on rows of `X`.
+Compute a low-rank factor for the kernel matrix induced by `kernel` on rows of `X`.
 
-| Parameter    | Default    | Description                                              |
-|-------------|------------|----------------------------------------------------------|
-| `kernel`     | —          | Callable `kernel(xᵢ, xⱼ) -> scalar`.                    |
-| `X`          | —          | `n × d` matrix; rows are data points.                    |
-| `rank`       | `nothing`  | Maximum rank. `nothing` means dynamic (auto-sized).      |
-| `rtol`       | `0.05`     | Stop when residual trace ≤ `rtol × tr(K)`.              |
-| `block_size` | `√n`       | Number of pivots sampled per block iteration.            |
+| Parameter    | Default              | Description                                           |
+|--------------|----------------------|-------------------------------------------------------|
+| `kernel`     | —                    | Callable `kernel(xᵢ, xⱼ) -> scalar`.                 |
+| `X`          | —                    | `n × d` matrix; rows are data points.                 |
+| `rank`       | `n`                  | Maximum rank.                                         |
+| `rtol`       | `0.05`               | Stop when residual trace ≤ `rtol × tr(K)`.           |
+| `block_size` | `clamp(√n, 4, 256)`  | Number of pivot candidates sampled per iteration.     |
 
-Returns an `n × k` matrix `L` such that `L * L'` approximates the kernel matrix.
+Returns an `n × k` matrix `G` such that `G * G'` approximates the kernel matrix.
 
 ## Algorithm
 
@@ -83,9 +85,11 @@ The implementation follows the **Accelerated RPCholesky** algorithm from:
 Key design choices:
 - Pivots are sampled proportionally to the **residual diagonal** using `StatsBase.sample`
   with `Weights`, which is the RPCholesky selection rule.
-- Processing is done in **blocks** to amortise sampling overhead.
+- Processing is done in **blocks** to amortise sampling overhead; within each block,
+  acceptance-rejection (Algorithm 2.1) decides which candidates are accepted cheaply
+  before evaluating full kernel columns.
+- The output factor `G` grows in multiples of `block_size` as pivots are accepted.
 - Allocations are minimised via `view()` and in-place `mul!` / broadcast updates.
-- When `rank=nothing`, the output factor grows dynamically (doubling strategy).
 
 ## License
 
