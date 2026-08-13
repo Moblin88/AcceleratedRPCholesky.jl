@@ -84,7 +84,7 @@ Key design choices:
 - Pivots are sampled proportionally to the **residual diagonal** using `StatsBase.sample`
   with `Weights`, which is the RPCholesky selection rule.
 - Processing is done in **blocks** to amortise sampling overhead.
-- Allocations are minimised via `@views` and in-place `mul!` / broadcast updates.
+- Allocations are minimised via `view()` and in-place `mul!` / broadcast updates.
 - When `rank=nothing`, the output factor grows dynamically (doubling strategy).
 
 ## License
