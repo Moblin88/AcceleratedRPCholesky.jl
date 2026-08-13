@@ -24,184 +24,35 @@ using StatsBase: sample, Weights
 
 export rpcholesky
 
-# ---------------------------------------------------------------------------
-# Algorithm 2.1 — RejectionCholesky
-# ---------------------------------------------------------------------------
-
-"""
-    _rejection_cholesky!(H) -> (L, accepted)
-
-Algorithm 2.1 from Epperly et al. (2024): run a sequential rejection sampler
-on the `b × b` residual sub-matrix `H`.
-
-- `H` is modified in place (Schur complement updates for accepted pivots).
-- `u = diag(H)` is frozen at entry as the acceptance envelope.
-- Pivot `j` (1-indexed) is accepted with probability `H[j,j] / u[j]`.
-- On acceptance, the Schur complement H[(j+1):b, (j+1):b] is deflated by the
-  outer product of the corresponding Cholesky column.
-- On rejection, H is left unchanged (the candidate is simply skipped).
-
-Returns the `r × r` lower-triangular Cholesky factor `L` for the accepted
-pivots, and the vector of accepted local indices (1-based, within 1:b).
-"""
-function _rejection_cholesky!(H::Matrix{T}) where {T<:Real}
-    b = size(H, 1)
-    u = copy(diag(H))          # frozen envelope: u[j] = H[j,j] before any update
-    L_scratch = zeros(T, b, b) # working Cholesky columns (b × b)
+# Algorithm 2.1 from Epperly et al. (2024).
+# Runs a sequential rejection sampler on the b×b residual sub-matrix H.
+# u = diag(H) is frozen at entry as the acceptance envelope; pivot j is
+# accepted with probability H[j,j] / u[j]. On acceptance, H is deflated by
+# the Schur complement; on rejection, H is left unchanged.
+# Returns the r×r lower-triangular Cholesky factor L and the accepted local indices.
+function _rejection_cholesky!(H::Matrix{Float64})
+    b         = size(H, 1)
+    u         = copy(diag(H))
+    L_scratch = zeros(Float64, b, b)
     accepted  = Int[]
 
     @inbounds for j in 1:b
         hjj = H[j, j]
-        # Skip numerically zero entries (can arise from floating-point negatives)
-        hjj <= zero(T) && continue
-
-        # Acceptance test: accept with probability H[j,j] / u[j]
+        hjj <= 0.0 && continue
         if rand() * u[j] < hjj
             push!(accepted, j)
-
-            inv_sqrt_hjj = one(T) / sqrt(hjj)
-
-            # Cholesky column for pivot j: L_scratch[j:b, j] = H[j:b, j] / sqrt(H[j,j])
             lj = view(L_scratch, j:b, j)
-            lj .= view(H, j:b, j) .* inv_sqrt_hjj
-
-            # Schur complement update: H[j+1:b, j+1:b] -= lj_tail * lj_tail'
-            # 5-arg mul! dispatches to BLAS.ger! for Float32/Float64 with no
-            # intermediate allocation; falls back to a generic loop otherwise.
+            lj .= view(H, j:b, j) ./ sqrt(hjj)
             if j < b
                 lj_tail = view(L_scratch, j+1:b, j)
-                H_sub   = view(H, j+1:b, j+1:b)
-                mul!(H_sub, lj_tail, lj_tail', -one(T), one(T))
+                mul!(view(H, j+1:b, j+1:b), lj_tail, lj_tail', -1.0, 1.0)
             end
         end
-        # If rejected: H is NOT updated — the diagonal H[j,j] for later pivots
-        # is unaffected, preserving the correct marginal distribution.
     end
 
-    r = length(accepted)
-    if r == 0
-        return zeros(T, 0, 0), Int[]
-    end
-
-    # Extract r × r Cholesky factor from the accepted columns
-    L = L_scratch[accepted, accepted]
-    return L, accepted
+    isempty(accepted) && return zeros(Float64, 0, 0), accepted
+    return L_scratch[accepted, accepted], accepted
 end
-
-# ---------------------------------------------------------------------------
-# Algorithm 2.2 — AcceleratedRPCholesky core
-# ---------------------------------------------------------------------------
-
-"""
-    _accelerated_rpcholesky_core!(G, piv, d, get_submatrix!, get_columns!, n, max_rank, rtol, block_size) -> (G, k)
-
-Algorithm 2.2 from Epperly et al. (2024): Accelerated Randomly Pivoted Cholesky.
-
-`G` starts as an `n × block_size` matrix and grows in multiples of `block_size`
-as new columns are accepted. `piv` is a `Vector{Int}` that grows via `append!`.
-
-Each outer iteration:
-1. Samples `b` candidate indices **with replacement** proportional to `d`.
-2. Forms the `b × b` residual sub-matrix `H = A[idx,idx] - G[idx,1:k]*G[idx,1:k]'`.
-3. Runs `_rejection_cholesky!(H)` (Algorithm 2.1) to get `r` accepted pivots and
-   their `r × r` lower-triangular Cholesky factor `L`.
-4. Writes `r` new columns directly into `G[:, k+1:k+r]` via `get_columns!`, subtracts
-   the existing-factor contribution in-place, then solves with `L` via `rdiv!`.
-5. Updates the residual diagonal `d`.
-
-`get_submatrix!(H, idx)` must fill the `b × b` matrix `H` with `A[idx, idx]`.
-`get_columns!(C, idx)` must fill the `n × r` matrix `C` with `A[:, idx]`.
-
-Returns `(G, k)` — the (possibly grown) factor matrix and total columns written.
-"""
-function _accelerated_rpcholesky_core!(
-    G              :: Matrix{T},
-    piv            :: Vector{Int},
-    d              :: Vector{T},
-    get_submatrix! :: Fsub,
-    get_columns!   :: Fcols,
-    n              :: Int,
-    max_rank       :: Int,
-    rtol           :: Real,
-    block_size     :: Int,
-) where {T<:Real, Fsub, Fcols}
-
-    trace0 = sum(d)
-    trace0 <= zero(T) && return G, 0
-
-    k     = 0
-    H_buf = Matrix{T}(undef, block_size, block_size)  # reusable b×b scratch
-
-    while k < max_rank
-        # Relative trace stopping criterion
-        sum(d) <= rtol * trace0 && break
-
-        b = min(block_size, max_rank - k)
-
-        # Phase 1 — Sample b candidates WITH REPLACEMENT proportional to d
-        w = max.(d, zero(T))
-        sum(w) <= zero(T) && break
-        idx = sample(1:n, Weights(w), b; replace=true)
-
-        # Phase 2 — Form residual sub-matrix H = A[idx,idx] - G[idx,1:k]*G[idx,1:k]'
-        H = b == block_size ? H_buf : Matrix{T}(undef, b, b)
-        get_submatrix!(H, idx)
-        if k > 0
-            Gk_idx = G[idx, 1:k]
-            mul!(H, Gk_idx, Gk_idx', -one(T), one(T))
-        end
-
-        # Phase 3 — Rejection Cholesky on the b×b block
-        L, accepted = _rejection_cholesky!(H)
-        r = length(accepted)
-        r == 0 && continue
-
-        # Cap at remaining budget
-        remaining = max_rank - k
-        if r > remaining
-            r        = remaining
-            accepted = accepted[1:r]
-            L        = L[1:r, 1:r]
-        end
-
-        global_idx = idx[accepted]   # global (1-based) row indices
-
-        # Grow G in multiples of block_size if needed
-        if k + r > size(G, 2)
-            new_cap = block_size * cld(k + r, block_size)
-            new_cap = min(new_cap, n)
-            G_new         = Matrix{T}(undef, n, new_cap)
-            G_new[:, 1:k] .= view(G, :, 1:k)
-            G             = G_new
-        end
-
-        # Phase 4 — Write new columns directly into G, update in-place, then solve
-        # G[:, k+1:k+r] = (A[:, global_idx] - G[:,1:k]*G[global_idx,1:k]') / L'
-        # Equivalent to: G_new * L' = raw  →  rdiv!(G_new, L')
-        G_new_cols = view(G, :, k+1:k+r)        # n × r view into G
-        get_columns!(G_new_cols, global_idx)     # fill n × r columns directly
-        if k > 0
-            mul!(G_new_cols, view(G, :, 1:k), G[global_idx, 1:k]', -one(T), one(T))
-        end
-        # Solve G_new_cols * L' = raw  in-place  (no allocation)
-        rdiv!(G_new_cols, LowerTriangular(L)')
-        append!(piv, global_idx)
-
-        # Phase 5 — Update residual diagonal
-        for l in 1:r
-            col = view(G, :, k + l)
-            @. d = max(d - col * col, zero(T))
-        end
-
-        k += r
-    end
-
-    return G, k
-end
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
 
 """
     rpcholesky(kernel, X; rank=n, rtol=0.05, block_size) -> Matrix
@@ -248,44 +99,89 @@ function rpcholesky(
 ) where {KF, T<:Real}
     n        = size(X, 1)
     max_rank = min(rank, n)
-    bs       = block_size
 
-    # Diagonal: K[i,i] = kernel(xᵢ, xᵢ)
-    d = Vector{Float64}(undef, n)
-    for i in 1:n
-        xi = view(X, i, :)
-        d[i] = Float64(kernel(xi, xi))
-    end
+    # Residual diagonal: d[i] = K[i,i] = kernel(xᵢ, xᵢ)
+    d = Float64[kernel(view(X, i, :), view(X, i, :)) for i in 1:n]
 
-    # get_submatrix!(H, idx): b×b kernel submatrix — fill lower triangle only, then mirror
-    function get_submatrix!(H::AbstractMatrix{Float64}, idx::Vector{Int})
-        b = length(idx)
+    trace0 = sum(d)
+    trace0 <= 0.0 && return Matrix{Float64}(undef, n, 0)
+
+    G     = Matrix{Float64}(undef, n, block_size)
+    k     = 0
+    H_buf = Matrix{Float64}(undef, block_size, block_size)
+
+    while k < max_rank
+        sum(d) <= rtol * trace0 && break
+
+        b = min(block_size, max_rank - k)
+
+        # Phase 1 — sample b candidates proportional to residual diagonal
+        w = max.(d, 0.0)
+        sum(w) <= 0.0 && break
+        idx = sample(1:n, Weights(w), b; replace=true)
+
+        # Phase 2 — form b×b residual submatrix H = K[idx,idx] - G[idx,1:k]*G[idx,1:k]'
+        # Fill lower triangle only (kernel is symmetric), then mirror
+        H = b == block_size ? H_buf : Matrix{Float64}(undef, b, b)
         @inbounds for j in 1:b
             xj = view(X, idx[j], :)
             for i in j:b
-                H[i, j] = Float64(kernel(view(X, idx[i], :), xj))
+                H[i, j] = kernel(view(X, idx[i], :), xj)
             end
         end
-        LinearAlgebra.copytri!(H, 'L')
-    end
+        copytri!(H, 'L')
+        if k > 0
+            Gk = G[idx, 1:k]
+            mul!(H, Gk, Gk', -1.0, 1.0)
+        end
 
-    # get_columns!(C, idx): fills C (n×r) with kernel columns for idx
-    function get_columns!(C::AbstractMatrix{Float64}, idx::Vector{Int})
-        r = length(idx)
-        @inbounds for i in 1:r
-            xi = view(X, idx[i], :)
+        # Phase 3 — rejection Cholesky on the b×b block (Algorithm 2.1)
+        L, accepted = _rejection_cholesky!(H)
+        r = length(accepted)
+        r == 0 && continue
+
+        # Cap at remaining budget
+        if r > max_rank - k
+            r        = max_rank - k
+            accepted = accepted[1:r]
+            L        = L[1:r, 1:r]
+        end
+
+        global_idx = idx[accepted]
+
+        # Grow G in multiples of block_size if needed
+        if k + r > size(G, 2)
+            new_cap       = min(block_size * cld(k + r, block_size), n)
+            G_new         = Matrix{Float64}(undef, n, new_cap)
+            G_new[:, 1:k] .= view(G, :, 1:k)
+            G             = G_new
+        end
+
+        # Phase 4 — fill new columns, subtract prior contribution, solve in-place
+        # G[:, k+1:k+r] * L' = K[:, global_idx] - G[:,1:k] * G[global_idx,1:k]'
+        G_new_cols = view(G, :, k+1:k+r)
+        @inbounds for i in eachindex(global_idx)
+            xi = view(X, global_idx[i], :)
             for j in 1:n
-                C[j, i] = Float64(kernel(view(X, j, :), xi))
+                G_new_cols[j, i] = kernel(view(X, j, :), xi)
             end
         end
+        if k > 0
+            mul!(G_new_cols, view(G, :, 1:k), G[global_idx, 1:k]', -1.0, 1.0)
+        end
+        rdiv!(G_new_cols, LowerTriangular(L)')
+
+        # Phase 5 — update residual diagonal
+        for l in 1:r
+            col = view(G, :, k + l)
+            @. d = max(d - col * col, 0.0)
+        end
+
+        k += r
     end
 
-    piv = Int[]
-    G = Matrix{Float64}(undef, n, bs)
-    G, k = _accelerated_rpcholesky_core!(
-        G, piv, d, get_submatrix!, get_columns!, n, max_rank,
-        Float64(rtol), bs)
     return G[:, 1:k]
 end
 
 end # module RPCholesky
+
