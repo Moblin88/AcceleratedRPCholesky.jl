@@ -89,29 +89,27 @@ function _rejection_cholesky!(H::Matrix{T}) where {T<:Real}
 end
 
 # ---------------------------------------------------------------------------
-# Algorithm 2.2 — AcceleratedRPCholesky core (unified static + dynamic)
+# Algorithm 2.2 — AcceleratedRPCholesky core
 # ---------------------------------------------------------------------------
 
 """
-    _accelerated_rpcholesky_core!(G, piv, d, get_submatrix!, get_rows!, ...) -> (G, k)
+    _accelerated_rpcholesky_core!(G, piv, d, get_submatrix!, get_rows!, n, max_rank, rtol, block_size) -> (G, k)
 
 Algorithm 2.2 from Epperly et al. (2024): Accelerated Randomly Pivoted Cholesky.
 
-`G` is an `n × capacity` pre-allocated factor matrix; `piv` is a growable
-`Vector{Int}` of selected pivot indices (appended via `push!`).  When `dynamic`
-is `true`, `G` is reallocated with a doubling strategy if capacity is exceeded;
-when `false`, `G` is assumed to have exactly `max_rank` columns.
+`G` starts as an `n × block_size` matrix and grows in multiples of `block_size`
+as new columns are accepted. `piv` is a `Vector{Int}` that grows via `append!`.
 
 Each outer iteration:
 1. Samples `b` candidate indices **with replacement** proportional to `d`.
 2. Forms the `b × b` residual sub-matrix `H = A[idx,idx] - G[idx,1:k]*G[idx,1:k]'`.
-3. Runs `_rejection_cholesky!(H)` (Algorithm 2.1) to obtain accepted local
-   indices and the `r × r` lower-triangular Cholesky factor `L`.
-4. For accepted global pivots, computes new factor columns via triangular solve:
-   `G[:, k+1:k+r] = (L \\ raw)'`  where `raw = A[global,:]  -  G[global,1:k]*G[:,1:k]'`.
+3. Runs `_rejection_cholesky!(H)` (Algorithm 2.1) to get `r` accepted pivots and
+   their `r × r` lower-triangular Cholesky factor `L`.
+4. Writes `r` new columns directly into `G[:, k+1:k+r]`, then subtracts the
+   current-factor contribution in-place and solves with `L` via `rdiv!`.
 5. Updates the residual diagonal `d`.
 
-Returns `(G, k)` — the (possibly reallocated) factor matrix and total columns written.
+Returns `(G, k)` — the (possibly grown) factor matrix and total columns written.
 """
 function _accelerated_rpcholesky_core!(
     G              :: Matrix{T},
@@ -123,7 +121,6 @@ function _accelerated_rpcholesky_core!(
     max_rank       :: Int,
     rtol           :: Real,
     block_size     :: Int,
-    dynamic        :: Bool,
 ) where {T<:Real, Fsub, Frows}
 
     trace0 = sum(d)
@@ -147,15 +144,11 @@ function _accelerated_rpcholesky_core!(
         H = b == block_size ? H_buf : Matrix{T}(undef, b, b)
         get_submatrix!(H, idx)
         if k > 0
-            Gk_idx = G[idx, 1:k]   # b×k
+            Gk_idx = G[idx, 1:k]
             mul!(H, Gk_idx, Gk_idx', -one(T), one(T))
         end
         # Symmetrise to guard against floating-point asymmetry
-        for jj in 1:b, ii in 1:jj-1
-            h = (H[ii, jj] + H[jj, ii]) / 2
-            H[ii, jj] = h
-            H[jj, ii] = h
-        end
+        LinearAlgebra.copytri!(H, 'U')
 
         # Phase 3 — Rejection Cholesky on the b×b block
         L, accepted = _rejection_cholesky!(H)
@@ -172,25 +165,25 @@ function _accelerated_rpcholesky_core!(
 
         global_idx = idx[accepted]   # global (1-based) row indices
 
-        # Grow G if needed (dynamic mode only)
-        if dynamic && k + r > size(G, 2)
-            new_cap = max(min(size(G, 2) * 2, n), k + r)
+        # Grow G in multiples of block_size if needed
+        if k + r > size(G, 2)
+            new_cap = block_size * cld(k + r, block_size)
+            new_cap = min(new_cap, n)
             G_new         = Matrix{T}(undef, n, new_cap)
             G_new[:, 1:k] .= view(G, :, 1:k)
             G             = G_new
         end
 
-        # Phase 4 — Compute new factor columns via triangular solve
-        # raw = A[global_idx, :] - G[global_idx, 1:k] * G[:, 1:k]'   (r × n)
-        raw = Matrix{T}(undef, r, n)
-        get_rows!(raw, global_idx)
+        # Phase 4 — Write new columns directly into G, update in-place, then solve
+        # G[:, k+1:k+r] = (L \ (A[global_idx,:] - G[global_idx,1:k]*G[:,1:k]'))'
+        # Equivalent to: G_new * L' = raw   →  rdiv!(G_new, L')
+        G_new_cols = view(G, :, k+1:k+r)        # n × r view into G
+        get_rows!(G_new_cols', global_idx)        # fill (r × n) = raw rows
         if k > 0
-            mul!(raw, G[global_idx, 1:k], view(G, :, 1:k)', -one(T), one(T))
+            mul!(G_new_cols', G[global_idx, 1:k], view(G, :, 1:k)', -one(T), one(T))
         end
-
-        # Solve L * new_cols' = raw  →  new_cols = (L \ raw)'   (n × r)
-        ldiv!(LowerTriangular(L), raw)   # in-place: raw becomes L \ raw (r × n)
-        G[:, k+1:k+r] .= raw'
+        # Solve G_new_cols * L' = raw  in-place  (no allocation)
+        rdiv!(G_new_cols, LowerTriangular(L)')
         append!(piv, global_idx)
 
         # Phase 5 — Update residual diagonal
@@ -210,14 +203,14 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    rpcholesky(A; rank=nothing, rtol=0.05, block_size=nothing) -> CholeskyPivoted
+    rpcholesky(A; rank=nothing, rtol=0.05, block_size) -> CholeskyPivoted
 
 Compute an Accelerated Randomly Pivoted Cholesky low-rank approximation of the
 `n × n` symmetric positive semidefinite matrix `A`.
 
 Returns a `CholeskyPivoted` object `F` where:
 - `F.rank` is the number of columns `k` of the computed factor.
-- `F.factors[:, 1:F.rank]` is the `n × k` factor `L` satisfying `L * L' ≈ A`.
+- `F.factors[:, 1:F.rank]` is the `n × k` factor `G` satisfying `G * G' ≈ A`.
 - `F.p[1:F.rank]` contains the selected pivot indices.
 
 The algorithm (Algorithm 2.2 of Epperly et al., 2024) stops when:
@@ -233,8 +226,8 @@ The algorithm (Algorithm 2.2 of Epperly et al., 2024) stops when:
 # Example
 ```julia
 F = rpcholesky(A; rank=20, rtol=0.05)
-L = F.factors[:, 1:F.rank]   # n × k low-rank factor
-approx = L * L'               # ≈ A
+G = F.factors[:, 1:F.rank]   # n × k low-rank factor
+approx = G * G'               # ≈ A
 ```
 
 # References
@@ -250,15 +243,15 @@ function rpcholesky(
     max_rank = isnothing(rank) ? n : min(rank, n)
     bs       = block_size
 
-    G   = Matrix{T}(undef, n, max_rank)
+    G   = Matrix{T}(undef, n, bs)
     piv = Int[]
     d   = T[A[i,i] for i in 1:n]
 
     get_submatrix!(H::Matrix{T}, idx::Vector{Int}) = (H .= A[idx, idx])
-    get_rows!(R::Matrix{T}, idx::Vector{Int})      = (R .= A[idx, :])
+    get_rows!(R::AbstractMatrix{T}, idx::Vector{Int}) = (R .= A[idx, :])
 
     G, k = _accelerated_rpcholesky_core!(
-        G, piv, d, get_submatrix!, get_rows!, n, max_rank, T(rtol), bs, false)
+        G, piv, d, get_submatrix!, get_rows!, n, max_rank, T(rtol), bs)
 
     # Embed the n × k factor in an n × n matrix for CholeskyPivoted metadata.
     # NOTE: G is NOT lower-triangular in general (RPCholesky selects random pivots),
@@ -272,10 +265,10 @@ function rpcholesky(
 end
 
 """
-    rpcholesky_kernel(kernel, X; rank=nothing, rtol=0.05, block_size=nothing) -> Matrix
+    rpcholesky_kernel(kernel, X; rank=nothing, rtol=0.05, block_size) -> Matrix
 
-Compute an Accelerated Randomly Pivoted Cholesky low-rank factor `L` such that
-`L * L' ≈ K`, where `K[i,j] = kernel(X[i,:], X[j,:])`.
+Compute an Accelerated Randomly Pivoted Cholesky low-rank factor `G` such that
+`G * G' ≈ K`, where `K[i,j] = kernel(X[i,:], X[j,:])`.
 
 Only `O(n·k + b²·iters)` kernel evaluations are performed (vs `O(n²)` for the
 full matrix), where `b` is the block size and `iters` is the number of outer
@@ -286,18 +279,18 @@ columns for rejected candidates.
 # Arguments
 - `kernel`      : callable `(xᵢ, xⱼ) -> scalar`.
 - `X`           : `n × d` data matrix (rows are observations).
-- `rank`        : maximum rank (default: `n`, dynamically allocated).
+- `rank`        : maximum rank (default: `n`).
 - `rtol`        : relative trace tolerance (default: `0.05`).
 - `block_size`  : candidates per block; defaults to `clamp(round(Int, sqrt(n)), 4, 256)`.
 
 # Returns
-An `n × k` matrix `L` such that `L * L' ≈ K`.
+An `n × k` matrix `G` such that `G * G' ≈ K`.
 
 # Example
 ```julia
 rbf(x, y) = exp(-sum((x .- y).^2) / 2)
-L = rpcholesky_kernel(rbf, X; rank=30, rtol=0.05)
-approx = L * L'
+G = rpcholesky_kernel(rbf, X; rank=30, rtol=0.05)
+approx = G * G'
 ```
 
 # References
@@ -322,7 +315,7 @@ function rpcholesky_kernel(
     end
 
     # get_submatrix!(H, idx): b×b kernel submatrix
-    function get_submatrix!(H::Matrix{Float64}, idx::Vector{Int})
+    function get_submatrix!(H::AbstractMatrix{Float64}, idx::Vector{Int})
         b = length(idx)
         @inbounds for j in 1:b
             xj = view(X, idx[j], :)
@@ -332,8 +325,8 @@ function rpcholesky_kernel(
         end
     end
 
-    # get_rows!(R, idx): r×n kernel rows
-    function get_rows!(R::Matrix{Float64}, idx::Vector{Int})
+    # get_rows!(R, idx): fills R (r×n) with kernel rows for idx
+    function get_rows!(R::AbstractMatrix{Float64}, idx::Vector{Int})
         r = length(idx)
         @inbounds for j in 1:n
             xj = view(X, j, :)
@@ -344,19 +337,10 @@ function rpcholesky_kernel(
     end
 
     piv = Int[]
-    if isnothing(rank)
-        # Dynamic allocation: start small and double as needed
-        init_cols = min(bs * 2, n)
-        G = Matrix{Float64}(undef, n, init_cols)
-        G, k = _accelerated_rpcholesky_core!(
-            G, piv, d, get_submatrix!, get_rows!, n, max_rank,
-            Float64(rtol), bs, true)
-    else
-        G = Matrix{Float64}(undef, n, max_rank)
-        G, k = _accelerated_rpcholesky_core!(
-            G, piv, d, get_submatrix!, get_rows!, n, max_rank,
-            Float64(rtol), bs, false)
-    end
+    G = Matrix{Float64}(undef, n, bs)
+    G, k = _accelerated_rpcholesky_core!(
+        G, piv, d, get_submatrix!, get_rows!, n, max_rank,
+        Float64(rtol), bs)
     return G[:, 1:k]
 end
 
