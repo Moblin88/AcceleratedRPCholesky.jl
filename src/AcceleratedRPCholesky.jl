@@ -30,7 +30,7 @@ export rpcholesky
 # accepted with probability H[j,j] / u[j]. On acceptance, H is deflated by
 # the Schur complement; on rejection, H is left unchanged.
 # Returns the r×r lower-triangular Cholesky factor L and the accepted local indices.
-function _block_pivot_cholesky!(H::Matrix{Float64})
+function _block_pivot_cholesky!(H::AbstractMatrix{Float64})
     b         = size(H, 1)
     u         = copy(diag(H))
     L_scratch = zeros(Float64, b, b)
@@ -123,7 +123,7 @@ function rpcholesky(
 
         # Phase 2 — form b×b residual submatrix H = K[idx,idx] - G[idx,1:k]*G[idx,1:k]'
         # Fill lower triangle only (kernel is symmetric), then mirror
-        H = b == block_size ? H_buf : Matrix{Float64}(undef, b, b)
+        H = view(H_buf, 1:b, 1:b)
         @inbounds for j in 1:b
             xj = view(X, idx[j], :)
             for i in j:b
