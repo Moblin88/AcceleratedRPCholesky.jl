@@ -105,9 +105,12 @@ Each outer iteration:
 2. Forms the `b × b` residual sub-matrix `H = A[idx,idx] - G[idx,1:k]*G[idx,1:k]'`.
 3. Runs `_rejection_cholesky!(H)` (Algorithm 2.1) to get `r` accepted pivots and
    their `r × r` lower-triangular Cholesky factor `L`.
-4. Writes `r` new columns directly into `G[:, k+1:k+r]`, then subtracts the
-   current-factor contribution in-place and solves with `L` via `rdiv!`.
+4. Writes `r` new columns directly into `G[:, k+1:k+r]` via `get_columns!`, subtracts
+   the existing-factor contribution in-place, then solves with `L` via `rdiv!`.
 5. Updates the residual diagonal `d`.
+
+`get_submatrix!(H, idx)` must fill the `b × b` matrix `H` with `A[idx, idx]`.
+`get_columns!(C, idx)` must fill the `n × r` matrix `C` with `A[:, idx]`.
 
 Returns `(G, k)` — the (possibly grown) factor matrix and total columns written.
 """
@@ -116,12 +119,12 @@ function _accelerated_rpcholesky_core!(
     piv            :: Vector{Int},
     d              :: Vector{T},
     get_submatrix! :: Fsub,
-    get_columns!   :: Frows,
+    get_columns!   :: Fcols,
     n              :: Int,
     max_rank       :: Int,
     rtol           :: Real,
     block_size     :: Int,
-) where {T<:Real, Fsub, Frows}
+) where {T<:Real, Fsub, Fcols}
 
     trace0 = sum(d)
     trace0 <= zero(T) && return G, 0
@@ -173,12 +176,12 @@ function _accelerated_rpcholesky_core!(
         end
 
         # Phase 4 — Write new columns directly into G, update in-place, then solve
-        # G[:, k+1:k+r] = (L \ (A[global_idx,:] - G[global_idx,1:k]*G[:,1:k]'))'
-        # Equivalent to: G_new * L' = raw   →  rdiv!(G_new, L')
+        # G[:, k+1:k+r] = (A[:, global_idx] - G[:,1:k]*G[global_idx,1:k]') / L'
+        # Equivalent to: G_new * L' = raw  →  rdiv!(G_new, L')
         G_new_cols = view(G, :, k+1:k+r)        # n × r view into G
-        get_columns!(G_new_cols', global_idx)    # fill (r × n) = raw columns of G
+        get_columns!(G_new_cols, global_idx)     # fill n × r columns directly
         if k > 0
-            mul!(G_new_cols', G[global_idx, 1:k], view(G, :, 1:k)', -one(T), one(T))
+            mul!(G_new_cols, view(G, :, 1:k), G[global_idx, 1:k]', -one(T), one(T))
         end
         # Solve G_new_cols * L' = raw  in-place  (no allocation)
         rdiv!(G_new_cols, LowerTriangular(L)')
@@ -246,7 +249,7 @@ function rpcholesky(
     d   = T[A[i,i] for i in 1:n]
 
     get_submatrix!(H::Matrix{T}, idx::Vector{Int}) = (H .= A[idx, idx])
-    get_columns!(R::AbstractMatrix{T}, idx::Vector{Int}) = (R .= A[idx, :])
+    get_columns!(C::AbstractMatrix{T}, idx::Vector{Int}) = (C .= A[:, idx])
 
     G, k = _accelerated_rpcholesky_core!(
         G, piv, d, get_submatrix!, get_columns!, n, max_rank, T(rtol), bs)
@@ -324,13 +327,13 @@ function rpcholesky_kernel(
         LinearAlgebra.copytri!(H, 'L')
     end
 
-    # get_columns!(R, idx): fills R (r×n) with kernel rows for idx
-    function get_columns!(R::AbstractMatrix{Float64}, idx::Vector{Int})
+    # get_columns!(C, idx): fills C (n×r) with kernel columns for idx
+    function get_columns!(C::AbstractMatrix{Float64}, idx::Vector{Int})
         r = length(idx)
-        @inbounds for j in 1:n
-            xj = view(X, j, :)
-            for i in 1:r
-                R[i, j] = Float64(kernel(view(X, idx[i], :), xj))
+        @inbounds for i in 1:r
+            xi = view(X, idx[i], :)
+            for j in 1:n
+                C[j, i] = Float64(kernel(view(X, j, :), xi))
             end
         end
     end
