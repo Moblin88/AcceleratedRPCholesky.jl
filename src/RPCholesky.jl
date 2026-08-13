@@ -129,7 +129,7 @@ function rpcholesky(
                 H[i, j] = kernel(view(X, idx[i], :), xj)
             end
         end
-        copytri!(H, 'L')
+        LinearAlgebra.copytri!(H, 'L')
         if k > 0
             Gk = G[idx, 1:k]
             mul!(H, Gk, Gk', -1.0, 1.0)
