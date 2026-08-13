@@ -63,3 +63,7 @@ Key design choices:
 ## License
 
 MIT
+
+---
+
+> **Disclaimer:** This package was generated with the assistance of AI tools and reviewed by a human author.
