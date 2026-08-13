@@ -1,11 +1,11 @@
 using Test
 using LinearAlgebra
 using Random
-using RPCholesky
+using AcceleratedRPCholesky
 
 Random.seed!(42)
 
-@testset "RPCholesky.jl" begin
+@testset "AcceleratedRPCholesky.jl" begin
 
     @testset "rpcholesky - kernel interface" begin
         n = 15

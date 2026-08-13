@@ -1,5 +1,5 @@
-name = "RPCholesky"
-uuid = "4129f197-a8e4-479b-a6ba-330715da4fb4"
+name = "AcceleratedRPCholesky"
+uuid = "86c4f97d-bf8b-4c1e-a6df-294a62ff2a73"
 authors = ["Nicholas Engelking"]
 version = "0.1.0"
 
