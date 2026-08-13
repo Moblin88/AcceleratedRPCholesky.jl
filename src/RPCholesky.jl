@@ -201,7 +201,7 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    rpcholesky(A; rank=nothing, rtol=0.05, block_size) -> CholeskyPivoted
+    rpcholesky(A; rank=n, rtol=0.05, block_size) -> CholeskyPivoted
 
 Compute an Accelerated Randomly Pivoted Cholesky low-rank approximation of the
 `n × n` symmetric positive semidefinite matrix `A`.
@@ -233,12 +233,12 @@ Epperly et al. (2024), *Accelerated Randomly Pivoted Cholesky*, arXiv:2410.03969
 """
 function rpcholesky(
     A          :: AbstractMatrix{T};
-    rank       :: Union{Int,Nothing} = nothing,
-    rtol       :: Real               = 0.05,
-    block_size :: Int                = clamp(round(Int, sqrt(LinearAlgebra.checksquare(A))), 4, 256),
+    rank       :: Int  = LinearAlgebra.checksquare(A),
+    rtol       :: Real = 0.05,
+    block_size :: Int  = clamp(round(Int, sqrt(LinearAlgebra.checksquare(A))), 4, 256),
 ) where {T<:Real}
     n        = LinearAlgebra.checksquare(A)
-    max_rank = isnothing(rank) ? n : min(rank, n)
+    max_rank = min(rank, n)
     bs       = block_size
 
     G   = Matrix{T}(undef, n, bs)
@@ -263,7 +263,7 @@ function rpcholesky(
 end
 
 """
-    rpcholesky_kernel(kernel, X; rank=nothing, rtol=0.05, block_size) -> Matrix
+    rpcholesky_kernel(kernel, X; rank=n, rtol=0.05, block_size) -> Matrix
 
 Compute an Accelerated Randomly Pivoted Cholesky low-rank factor `G` such that
 `G * G' ≈ K`, where `K[i,j] = kernel(X[i,:], X[j,:])`.
@@ -297,12 +297,12 @@ Epperly et al. (2024), *Accelerated Randomly Pivoted Cholesky*, arXiv:2410.03969
 function rpcholesky_kernel(
     kernel     :: KF,
     X          :: AbstractMatrix{T};
-    rank       :: Union{Int,Nothing} = nothing,
-    rtol       :: Real               = 0.05,
-    block_size :: Int                = clamp(round(Int, sqrt(size(X, 1))), 4, 256),
+    rank       :: Int  = size(X, 1),
+    rtol       :: Real = 0.05,
+    block_size :: Int  = clamp(round(Int, sqrt(size(X, 1))), 4, 256),
 ) where {KF, T<:Real}
     n        = size(X, 1)
-    max_rank = isnothing(rank) ? n : min(rank, n)
+    max_rank = min(rank, n)
     bs       = block_size
 
     # Diagonal: K[i,i] = kernel(xᵢ, xᵢ)
@@ -312,16 +312,16 @@ function rpcholesky_kernel(
         d[i] = Float64(kernel(xi, xi))
     end
 
-    # get_submatrix!(H, idx): b×b kernel submatrix (symmetrised)
+    # get_submatrix!(H, idx): b×b kernel submatrix — fill lower triangle only, then mirror
     function get_submatrix!(H::AbstractMatrix{Float64}, idx::Vector{Int})
         b = length(idx)
         @inbounds for j in 1:b
             xj = view(X, idx[j], :)
-            for i in 1:b
+            for i in j:b
                 H[i, j] = Float64(kernel(view(X, idx[i], :), xj))
             end
         end
-        LinearAlgebra.copytri!(H, 'U')
+        LinearAlgebra.copytri!(H, 'L')
     end
 
     # get_columns!(R, idx): fills R (r×n) with kernel rows for idx

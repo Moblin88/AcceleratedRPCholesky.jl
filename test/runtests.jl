@@ -42,7 +42,7 @@ Random.seed!(42)
             @test F isa CholeskyPivoted
         end
 
-        @testset "rank=nothing defaults to n" begin
+        @testset "rank defaults to n" begin
             F = rpcholesky(A; rtol=1e-10)
             @test size(F.factors, 1) == n
         end
@@ -77,7 +77,7 @@ Random.seed!(42)
             @test err < 0.5
         end
 
-        @testset "dynamic rank (rank=nothing)" begin
+        @testset "dynamic rank (defaults to n)" begin
             L = rpcholesky_kernel(rbf, X; rtol=0.05)
             @test size(L, 1) == n
         end
