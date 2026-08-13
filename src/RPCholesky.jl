@@ -28,12 +28,24 @@ export rpcholesky, rpcholesky_kernel
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-"""
-    _default_block_size(n)
+# Symmetric rank-1 update: A -= v * v'
+# For BLAS-native types (Float32/Float64) delegates to BLAS.syr! (fast path).
+# Falls back to a generic upper-triangle loop for other Real types.
+function _sym_rank1_downdate!(A::AbstractMatrix{T}, v::AbstractVector{T}) where {T <: BLAS.BlasReal}
+    BLAS.syr!('U', -one(T), v, A)
+    LinearAlgebra.copytri!(A, 'U')
+end
 
-Heuristic block size: roughly sqrt(n), clipped to [4, 256].
-"""
-_default_block_size(n::Int) = clamp(round(Int, sqrt(n)), 4, 256)
+function _sym_rank1_downdate!(A::AbstractMatrix{T}, v::AbstractVector{T}) where {T <: Real}
+    n = length(v)
+    @inbounds for j in 1:n
+        vj = v[j]
+        for i in 1:j
+            A[i, j] -= v[i] * vj
+            A[j, i] = A[i, j]
+        end
+    end
+end
 
 # ---------------------------------------------------------------------------
 # Algorithm 2.1 — RejectionCholesky
@@ -74,21 +86,13 @@ function _rejection_cholesky!(H::Matrix{T}) where {T<:Real}
 
             # Cholesky column for pivot j: L_scratch[j:b, j] = H[j:b, j] / sqrt(H[j,j])
             lj = view(L_scratch, j:b, j)
-            h_col = view(H, j:b, j)
-            lj .= h_col .* inv_sqrt_hjj
+            lj .= view(H, j:b, j) .* inv_sqrt_hjj
 
-            # Schur complement update: deflate remaining sub-block
-            # H[j+1:b, j+1:b] -= lj_tail * lj_tail'  (rank-1 update)
+            # Schur complement update: H[j+1:b, j+1:b] -= lj_tail * lj_tail'
             if j < b
                 lj_tail = view(L_scratch, j+1:b, j)
                 H_sub   = view(H, j+1:b, j+1:b)
-                # Generic rank-1 update avoiding a temporary outer-product matrix
-                for jj in 1:size(H_sub, 2)
-                    ljj = lj_tail[jj]
-                    @simd for ii in 1:size(H_sub, 1)
-                        H_sub[ii, jj] -= lj_tail[ii] * ljj
-                    end
-                end
+                _sym_rank1_downdate!(H_sub, lj_tail)
             end
         end
         # If rejected: H is NOT updated — the diagonal H[j,j] for later pivots
@@ -216,8 +220,8 @@ function _accelerated_rpcholesky_core!(
         end
 
         # Solve L * new_cols' = raw  →  new_cols = (L \ raw)'   (n × r)
-        new_cols_T = LowerTriangular(L) \ raw   # r × n
-        G[:, k+1:k+r]  .= new_cols_T'
+        ldiv!(LowerTriangular(L), raw)   # in-place: raw becomes L \ raw (r × n)
+        G[:, k+1:k+r]  .= raw'
         piv[k+1:k+r]    .= global_idx
 
         # Phase 5 — Update residual diagonal
@@ -271,11 +275,11 @@ function rpcholesky(
     A          :: AbstractMatrix{T};
     rank       :: Union{Int,Nothing} = nothing,
     rtol       :: Real               = 0.05,
-    block_size :: Union{Int,Nothing} = nothing,
+    block_size :: Int                = clamp(round(Int, sqrt(LinearAlgebra.checksquare(A))), 4, 256),
 ) where {T<:Real}
     n        = LinearAlgebra.checksquare(A)
     max_rank = isnothing(rank) ? n : min(rank, n)
-    bs       = isnothing(block_size) ? _default_block_size(n) : block_size
+    bs       = block_size
 
     G   = Matrix{T}(undef, n, max_rank)
     piv = Vector{Int}(undef, max_rank)
@@ -352,11 +356,11 @@ function rpcholesky_kernel(
     X          :: AbstractMatrix{T};
     rank       :: Union{Int,Nothing} = nothing,
     rtol       :: Real               = 0.05,
-    block_size :: Union{Int,Nothing} = nothing,
+    block_size :: Int                = clamp(round(Int, sqrt(size(X, 1))), 4, 256),
 ) where {KF, T<:Real}
     n        = size(X, 1)
     max_rank = isnothing(rank) ? n : min(rank, n)
-    bs       = isnothing(block_size) ? _default_block_size(n) : block_size
+    bs       = block_size
 
     # Diagonal: K[i,i] = kernel(xᵢ, xᵢ)
     d = Vector{Float64}(undef, n)
@@ -389,7 +393,7 @@ function rpcholesky_kernel(
 
     if isnothing(rank)
         # Dynamic allocation: start small and double as needed
-        init_cols = min(_default_block_size(n) * 2, n)
+        init_cols = min(bs * 2, n)
         G_vec   = [Matrix{Float64}(undef, n, init_cols)]
         piv_vec = [Vector{Int}(undef, init_cols)]
         k = _accelerated_rpcholesky_core!(
