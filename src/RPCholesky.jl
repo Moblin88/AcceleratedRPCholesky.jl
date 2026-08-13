@@ -93,7 +93,7 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    _accelerated_rpcholesky_core!(G, piv, d, get_submatrix!, get_rows!, n, max_rank, rtol, block_size) -> (G, k)
+    _accelerated_rpcholesky_core!(G, piv, d, get_submatrix!, get_columns!, n, max_rank, rtol, block_size) -> (G, k)
 
 Algorithm 2.2 from Epperly et al. (2024): Accelerated Randomly Pivoted Cholesky.
 
@@ -116,7 +116,7 @@ function _accelerated_rpcholesky_core!(
     piv            :: Vector{Int},
     d              :: Vector{T},
     get_submatrix! :: Fsub,
-    get_rows!      :: Frows,
+    get_columns!   :: Frows,
     n              :: Int,
     max_rank       :: Int,
     rtol           :: Real,
@@ -147,8 +147,6 @@ function _accelerated_rpcholesky_core!(
             Gk_idx = G[idx, 1:k]
             mul!(H, Gk_idx, Gk_idx', -one(T), one(T))
         end
-        # Symmetrise to guard against floating-point asymmetry
-        LinearAlgebra.copytri!(H, 'U')
 
         # Phase 3 — Rejection Cholesky on the b×b block
         L, accepted = _rejection_cholesky!(H)
@@ -178,7 +176,7 @@ function _accelerated_rpcholesky_core!(
         # G[:, k+1:k+r] = (L \ (A[global_idx,:] - G[global_idx,1:k]*G[:,1:k]'))'
         # Equivalent to: G_new * L' = raw   →  rdiv!(G_new, L')
         G_new_cols = view(G, :, k+1:k+r)        # n × r view into G
-        get_rows!(G_new_cols', global_idx)        # fill (r × n) = raw rows
+        get_columns!(G_new_cols', global_idx)    # fill (r × n) = raw columns of G
         if k > 0
             mul!(G_new_cols', G[global_idx, 1:k], view(G, :, 1:k)', -one(T), one(T))
         end
@@ -248,10 +246,10 @@ function rpcholesky(
     d   = T[A[i,i] for i in 1:n]
 
     get_submatrix!(H::Matrix{T}, idx::Vector{Int}) = (H .= A[idx, idx])
-    get_rows!(R::AbstractMatrix{T}, idx::Vector{Int}) = (R .= A[idx, :])
+    get_columns!(R::AbstractMatrix{T}, idx::Vector{Int}) = (R .= A[idx, :])
 
     G, k = _accelerated_rpcholesky_core!(
-        G, piv, d, get_submatrix!, get_rows!, n, max_rank, T(rtol), bs)
+        G, piv, d, get_submatrix!, get_columns!, n, max_rank, T(rtol), bs)
 
     # Embed the n × k factor in an n × n matrix for CholeskyPivoted metadata.
     # NOTE: G is NOT lower-triangular in general (RPCholesky selects random pivots),
@@ -314,7 +312,7 @@ function rpcholesky_kernel(
         d[i] = Float64(kernel(xi, xi))
     end
 
-    # get_submatrix!(H, idx): b×b kernel submatrix
+    # get_submatrix!(H, idx): b×b kernel submatrix (symmetrised)
     function get_submatrix!(H::AbstractMatrix{Float64}, idx::Vector{Int})
         b = length(idx)
         @inbounds for j in 1:b
@@ -323,10 +321,11 @@ function rpcholesky_kernel(
                 H[i, j] = Float64(kernel(view(X, idx[i], :), xj))
             end
         end
+        LinearAlgebra.copytri!(H, 'U')
     end
 
-    # get_rows!(R, idx): fills R (r×n) with kernel rows for idx
-    function get_rows!(R::AbstractMatrix{Float64}, idx::Vector{Int})
+    # get_columns!(R, idx): fills R (r×n) with kernel rows for idx
+    function get_columns!(R::AbstractMatrix{Float64}, idx::Vector{Int})
         r = length(idx)
         @inbounds for j in 1:n
             xj = view(X, j, :)
@@ -339,7 +338,7 @@ function rpcholesky_kernel(
     piv = Int[]
     G = Matrix{Float64}(undef, n, bs)
     G, k = _accelerated_rpcholesky_core!(
-        G, piv, d, get_submatrix!, get_rows!, n, max_rank,
+        G, piv, d, get_submatrix!, get_columns!, n, max_rank,
         Float64(rtol), bs)
     return G[:, 1:k]
 end
