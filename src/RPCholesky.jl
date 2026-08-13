@@ -2,10 +2,10 @@
     RPCholesky
 
 Julia package implementing the Accelerated Randomly Pivoted Cholesky (RPCholesky)
-algorithm for low-rank approximation of positive semidefinite (PSD) matrices and
-kernel matrices.
+algorithm for low-rank approximation of kernel matrices.
 
-The low-rank factor `G` (n × k) satisfies `G * G' ≈ A`.
+The low-rank factor `G` (n × k) satisfies `G * G' ≈ K`, where `K` is the kernel
+matrix induced by a user-supplied kernel function.
 
 # References
 Chen, Y., Epperly, E. N., Tropp, J. A., & Webber, R. J. (2024).
@@ -22,27 +22,7 @@ module RPCholesky
 using LinearAlgebra
 using StatsBase: sample, Weights
 
-export rpcholesky, rpcholesky_kernel, RPCholeskyResult
-
-# ---------------------------------------------------------------------------
-# Result type
-# ---------------------------------------------------------------------------
-
-"""
-    RPCholeskyResult{T}
-
-Result of [`rpcholesky`](@ref).
-
-# Fields
-- `G   :: Matrix{T}` — `n × k` low-rank factor; `G * G' ≈ A`.
-- `piv :: Vector{Int}` — the `k` pivot indices selected by the algorithm.
-- `rank :: Int` — number of columns `k` in `G`.
-"""
-struct RPCholeskyResult{T}
-    G    :: Matrix{T}
-    piv  :: Vector{Int}
-    rank :: Int
-end
+export rpcholesky
 
 # ---------------------------------------------------------------------------
 # Algorithm 2.1 — RejectionCholesky
@@ -224,60 +204,7 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    rpcholesky(A; rank=n, rtol=0.05, block_size) -> RPCholeskyResult
-
-Compute an Accelerated Randomly Pivoted Cholesky low-rank approximation of the
-`n × n` symmetric positive semidefinite matrix `A`.
-
-Returns an [`RPCholeskyResult`](@ref) `F` where:
-- `F.rank` is the number of columns `k` of the computed factor.
-- `F.G` is the `n × k` factor satisfying `F.G * F.G' ≈ A`.
-- `F.piv` contains the `k` selected pivot indices.
-
-The algorithm (Algorithm 2.2 of Epperly et al., 2024) stops when:
-1. `k == rank` (if `rank` is given), **or**
-2. `tr(residual) ≤ rtol × tr(A)`.
-
-# Arguments
-- `A`           : `n × n` symmetric PSD matrix.
-- `rank`        : maximum rank (default: `n`).
-- `rtol`        : relative trace tolerance (default: `0.05`).
-- `block_size`  : candidates per block; defaults to `clamp(round(Int, sqrt(n)), 4, 256)`.
-
-# Example
-```julia
-F = rpcholesky(A; rank=20, rtol=0.05)
-approx = F.G * F.G'   # ≈ A
-```
-
-# References
-Epperly et al. (2024), *Accelerated Randomly Pivoted Cholesky*, arXiv:2410.03969.
-"""
-function rpcholesky(
-    A          :: AbstractMatrix{T};
-    rank       :: Int  = LinearAlgebra.checksquare(A),
-    rtol       :: Real = 0.05,
-    block_size :: Int  = clamp(round(Int, sqrt(LinearAlgebra.checksquare(A))), 4, 256),
-) where {T<:Real}
-    n        = LinearAlgebra.checksquare(A)
-    max_rank = min(rank, n)
-    bs       = block_size
-
-    G   = Matrix{T}(undef, n, bs)
-    piv = Int[]
-    d   = T[A[i,i] for i in 1:n]
-
-    get_submatrix!(H::Matrix{T}, idx::Vector{Int}) = (H .= A[idx, idx])
-    get_columns!(C::AbstractMatrix{T}, idx::Vector{Int}) = (C .= A[:, idx])
-
-    G, k = _accelerated_rpcholesky_core!(
-        G, piv, d, get_submatrix!, get_columns!, n, max_rank, T(rtol), bs)
-
-    return RPCholeskyResult{T}(G[:, 1:k], piv, k)
-end
-
-"""
-    rpcholesky_kernel(kernel, X; rank=n, rtol=0.05, block_size) -> Matrix
+    rpcholesky(kernel, X; rank=n, rtol=0.05, block_size) -> Matrix
 
 Compute an Accelerated Randomly Pivoted Cholesky low-rank factor `G` such that
 `G * G' ≈ K`, where `K[i,j] = kernel(X[i,:], X[j,:])`.
@@ -288,6 +215,10 @@ iterations. The acceleration comes from the block rejection sampling step
 (Algorithm 2.1 of Epperly et al., 2024), which avoids computing full kernel
 columns for rejected candidates.
 
+The algorithm stops when:
+1. `k == rank` (if `rank` is given), **or**
+2. `tr(residual) ≤ rtol × tr(K)`.
+
 # Arguments
 - `kernel`      : callable `(xᵢ, xⱼ) -> scalar`.
 - `X`           : `n × d` data matrix (rows are observations).
@@ -296,19 +227,19 @@ columns for rejected candidates.
 - `block_size`  : candidates per block; defaults to `clamp(round(Int, sqrt(n)), 4, 256)`.
 
 # Returns
-An `n × k` matrix `G` such that `G * G' ≈ K`.
+An `n × k` matrix `G` such that `G * G'` approximates the kernel matrix.
 
 # Example
 ```julia
 rbf(x, y) = exp(-sum((x .- y).^2) / 2)
-G = rpcholesky_kernel(rbf, X; rank=30, rtol=0.05)
+G = rpcholesky(rbf, X; rank=30, rtol=0.05)
 approx = G * G'
 ```
 
 # References
 Epperly et al. (2024), *Accelerated Randomly Pivoted Cholesky*, arXiv:2410.03969.
 """
-function rpcholesky_kernel(
+function rpcholesky(
     kernel     :: KF,
     X          :: AbstractMatrix{T};
     rank       :: Int  = size(X, 1),

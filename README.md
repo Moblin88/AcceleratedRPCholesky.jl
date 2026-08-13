@@ -4,8 +4,7 @@
 [![codecov](https://codecov.io/gh/Moblin88/RPCholesky.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/Moblin88/RPCholesky.jl)
 
 Julia package implementing the **Accelerated Randomly Pivoted Cholesky** (RPCholesky)
-algorithm for efficient low-rank approximation of positive semidefinite (PSD) matrices
-and kernel matrices.
+algorithm for efficient low-rank approximation of kernel matrices.
 
 ## Installation
 
@@ -16,22 +15,6 @@ Pkg.add(url="https://github.com/Moblin88/RPCholesky.jl")
 
 ## Quick Start
 
-### Matrix interface
-
-```julia
-using RPCholesky, LinearAlgebra
-
-n = 200
-A_raw = randn(n, n)
-A = A_raw * A_raw' + n * I   # symmetric PSD
-
-# Approximate with rank ≤ 20, stopping when residual trace < 5% of original
-F = rpcholesky(A; rank=20, rtol=0.05)   # returns RPCholeskyResult
-println("Approximation error: ", norm(A - F.G * F.G') / norm(A))
-```
-
-### Kernel interface
-
 ```julia
 using RPCholesky
 
@@ -40,27 +23,13 @@ X = randn(500, 4)   # 500 observations, 4 features
 rbf(x, y) = exp(-sum((x .- y).^2) / 2.0)
 
 # Returns n × k factor G such that G*G' ≈ K (kernel matrix)
-G = rpcholesky_kernel(rbf, X; rank=30, rtol=0.05)
+G = rpcholesky(rbf, X; rank=30, rtol=0.05)
+approx = G * G'
 ```
 
 ## API
 
-### `rpcholesky(A; rank=n, rtol=0.05, block_size=clamp(√n, 4, 256))`
-
-Compute a low-rank factor for a symmetric PSD matrix `A`.
-
-| Parameter    | Default              | Description                                           |
-|--------------|----------------------|-------------------------------------------------------|
-| `rank`       | `n`                  | Maximum rank.                                         |
-| `rtol`       | `0.05`               | Stop when residual trace ≤ `rtol × tr(A)`.           |
-| `block_size` | `clamp(√n, 4, 256)`  | Number of pivot candidates sampled per iteration.     |
-
-Returns an `RPCholeskyResult` `F` with fields:
-- `F.G` — `n × k` factor; `F.G * F.G' ≈ A`.
-- `F.piv` — `k`-vector of selected pivot indices.
-- `F.rank` — number of accepted pivots `k`.
-
-### `rpcholesky_kernel(kernel, X; rank=n, rtol=0.05, block_size=clamp(√n, 4, 256))`
+### `rpcholesky(kernel, X; rank=n, rtol=0.05, block_size=clamp(√n, 4, 256))`
 
 Compute a low-rank factor for the kernel matrix induced by `kernel` on rows of `X`.
 
