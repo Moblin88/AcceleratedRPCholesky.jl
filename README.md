@@ -29,7 +29,7 @@ approx = G * G'
 
 ## API
 
-### `rpcholesky(kernel, X; rank=n, rtol=0.05, block_size=clamp(√n, 4, 256))`
+### `rpcholesky(kernel, X; rank=n, rtol=0.05, block_size=clamp(round(Int, √n), 4, 256))`
 
 Compute a low-rank factor for the kernel matrix induced by `kernel` on rows of `X`.
 
@@ -39,7 +39,7 @@ Compute a low-rank factor for the kernel matrix induced by `kernel` on rows of `
 | `X`          | —                    | `n × d` matrix; rows are data points.                 |
 | `rank`       | `n`                  | Maximum rank.                                         |
 | `rtol`       | `0.05`               | Stop when residual trace ≤ `rtol × tr(K)`.           |
-| `block_size` | `clamp(√n, 4, 256)`  | Number of pivot candidates sampled per iteration.     |
+| `block_size` | `clamp(round(Int, √n), 4, 256)` | Number of pivot candidates sampled per iteration.     |
 
 Returns an `n × k` matrix `G` such that `G * G'` approximates the kernel matrix.
 

@@ -41,7 +41,9 @@ Random.seed!(42)
         end
 
         @testset "rtol stopping" begin
+            Random.seed!(42)
             G_tight = rpcholesky(rbf, X; rank=n, rtol=0.01)
+            Random.seed!(42)
             G_loose = rpcholesky(rbf, X; rank=n, rtol=0.9)
             @test size(G_loose, 2) <= size(G_tight, 2)
         end
