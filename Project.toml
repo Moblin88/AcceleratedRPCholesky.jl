@@ -1,0 +1,18 @@
+name = "RPCholesky"
+uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+authors = ["RPCholesky.jl Contributors"]
+version = "0.1.0"
+
+[deps]
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+StatsBase = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
+
+[compat]
+julia = "1.9"
+StatsBase = "0.33, 0.34"
+
+[extras]
+Test = "8dfed614-e22c-358a-b082-f07c8a15d32a"
+
+[targets]
+test = ["Test"]
