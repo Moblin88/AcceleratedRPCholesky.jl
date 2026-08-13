@@ -177,9 +177,8 @@ function rpcholesky(
         @inbounds for i in 1:n
             dᵢ = d[i]
             for l in 1:r
-                dᵢ -= abs2(G_new_cols[i, l])
+                dᵢ = max(dᵢ - abs2(G_new_cols[i, l]), 0.0)
             end
-            dᵢ = max(dᵢ, 0.0)
             d[i] = dᵢ
             trace_mass += dᵢ
         end
