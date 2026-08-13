@@ -1,4 +1,4 @@
-# RPCholesky.jl
+# AcceleratedRPCholesky.jl
 
 [![CI](https://github.com/Moblin88/RPCholesky.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/Moblin88/RPCholesky.jl/actions/workflows/CI.yml)
 [![codecov](https://codecov.io/gh/Moblin88/RPCholesky.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/Moblin88/RPCholesky.jl)
@@ -16,7 +16,7 @@ Pkg.add(url="https://github.com/Moblin88/RPCholesky.jl")
 ## Quick Start
 
 ```julia
-using RPCholesky
+using AcceleratedRPCholesky
 
 X = randn(500, 4)   # 500 observations, 4 features
 

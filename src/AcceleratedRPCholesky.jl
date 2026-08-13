@@ -1,5 +1,5 @@
 """
-    RPCholesky
+    AcceleratedRPCholesky
 
 Julia package implementing the Accelerated Randomly Pivoted Cholesky (RPCholesky)
 algorithm for low-rank approximation of kernel matrices.
@@ -17,7 +17,7 @@ Epperly, E. N., Frangella, Z., Tropp, J. A., Webber, R. J., & Zangrando, M. (202
 *Accelerated Randomly Pivoted Cholesky.*
 [arXiv:2410.03969](https://arxiv.org/abs/2410.03969)
 """
-module RPCholesky
+module AcceleratedRPCholesky
 
 using LinearAlgebra
 using StatsBase: sample, Weights
@@ -183,5 +183,5 @@ function rpcholesky(
     return G[:, 1:k]
 end
 
-end # module RPCholesky
+end # module AcceleratedRPCholesky
 
