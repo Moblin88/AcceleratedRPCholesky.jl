@@ -1,7 +1,7 @@
 # AcceleratedRPCholesky.jl
 
-[![CI](https://github.com/Moblin88/RPCholesky.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/Moblin88/RPCholesky.jl/actions/workflows/CI.yml)
-[![codecov](https://codecov.io/gh/Moblin88/RPCholesky.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/Moblin88/RPCholesky.jl)
+[![CI](https://github.com/Moblin88/AcceleratedRPCholesky.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/Moblin88/AcceleratedRPCholesky.jl/actions/workflows/CI.yml)
+[![codecov](https://codecov.io/gh/Moblin88/AcceleratedRPCholesky.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/Moblin88/AcceleratedRPCholesky.jl)
 
 Julia package implementing the **Accelerated Randomly Pivoted Cholesky** (RPCholesky)
 algorithm for efficient low-rank approximation of kernel matrices.
@@ -10,7 +10,7 @@ algorithm for efficient low-rank approximation of kernel matrices.
 
 ```julia
 using Pkg
-Pkg.add(url="https://github.com/Moblin88/RPCholesky.jl")
+Pkg.add(url="https://github.com/Moblin88/AcceleratedRPCholesky.jl")
 ```
 
 ## Quick Start
