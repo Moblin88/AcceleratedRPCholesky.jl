@@ -29,19 +29,34 @@ approx = G * G'
 
 ## API
 
-### `rpcholesky(kernel, X; rank=n, rtol=0.05, block_size=clamp(round(Int, √n), 4, 256))`
+### `rpcholesky(kernel, data; rank=n, rtol=0.05, atol=1e-8, block_size=clamp(round(Int, √n), 4, 256))`
 
-Compute a low-rank factor for the kernel matrix induced by `kernel` on rows of `X`.
+Compute a low-rank factor for the kernel matrix induced by `kernel` on rows of
+`data`. `data` can be any one-based row-indexable collection supporting
+`size(data, 1)` and `view(data, i, :)`, including matrices and DataFrames.
 
 | Parameter    | Default              | Description                                           |
 |--------------|----------------------|-------------------------------------------------------|
 | `kernel`     | —                    | Callable `kernel(xᵢ, xⱼ) -> scalar`.                 |
-| `X`          | —                    | `n × d` matrix; rows are data points.                 |
+| `data`       | —                    | `n × d` row-indexable data; rows are data points.     |
 | `rank`       | `n`                  | Maximum rank.                                         |
 | `rtol`       | `0.05`               | Stop when residual trace ≤ `rtol × tr(K)`.           |
+| `atol`       | `1e-8`               | Stop when residual trace is at most this value.       |
 | `block_size` | `clamp(round(Int, √n), 4, 256)` | Number of pivot candidates sampled per iteration.     |
 
-Returns an `n × k` matrix `G` such that `G * G'` approximates the kernel matrix.
+Returns an `n × k` matrix `G` such that `G * G'` approximates the kernel
+matrix. The factor uses the kernel's scalar type, so a `Float32` kernel returns
+a `Matrix{Float32}` factor.
+
+For a DataFrame, the kernel receives each observation as a `DataFrameRow`:
+
+```julia
+using DataFrames
+
+data = DataFrame(x=randn(500), y=randn(500), z=randn(500))
+rbf(x, y) = exp(-sum((collect(x) .- collect(y)).^2) / 2)
+G = rpcholesky(rbf, data; rank=30)
+```
 
 ## Algorithm
 
@@ -52,8 +67,8 @@ The implementation follows the **Accelerated RPCholesky** algorithm from:
 > [arXiv:2410.03969](https://arxiv.org/abs/2410.03969)
 
 Key design choices:
-- Pivots are sampled proportionally to the **residual diagonal** using `StatsBase.sample`
-  with `Weights`, which is the RPCholesky selection rule.
+- Pivots are sampled proportionally to the **residual diagonal**, which is the
+  RPCholesky selection rule.
 - Processing is done in **blocks** to amortise sampling overhead; within each block,
   acceptance-rejection (Algorithm 2.1) decides which candidates are accepted cheaply
   before evaluating full kernel columns.

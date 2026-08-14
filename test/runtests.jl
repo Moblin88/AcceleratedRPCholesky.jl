@@ -1,6 +1,7 @@
 using Test
 using LinearAlgebra
 using Random
+using DataFrames
 using AcceleratedRPCholesky
 
 Random.seed!(42)
@@ -21,6 +22,25 @@ Random.seed!(42)
             @test G isa Matrix
             @test size(G, 1) == n
             @test size(G, 2) <= 5
+        end
+
+        @testset "supports DataFrames" begin
+            data = DataFrame(x=X[:, 1], y=X[:, 2], z=X[:, 3])
+            dataframe_rbf(x, y) = exp(-sum((collect(x) .- collect(y)).^2) / 2.0)
+            G = rpcholesky(dataframe_rbf, data; rank=5)
+            @test G isa Matrix{Float64}
+            @test size(G, 1) == n
+            @test size(G, 2) <= 5
+        end
+
+        @testset "preserves Float32 kernel type" begin
+            X32 = Float32.(X)
+            rbf32(x, y) = exp(Float32(-sum((x .- y).^2) / 2))
+            G = rpcholesky(rbf32, X32; rank=5)
+            @test G isa Matrix{Float32}
+            @test size(G, 1) == n
+            @test size(G, 2) <= 5
+            @test eltype(G * G') == Float32
         end
 
         @testset "approximation quality" begin
