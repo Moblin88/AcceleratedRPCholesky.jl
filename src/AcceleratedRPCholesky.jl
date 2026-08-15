@@ -63,8 +63,8 @@ function _block_pivot_cholesky!(H, max_accepted, abs_tol)
     return LowerTriangular(H[accepted, accepted]), accepted
 end
 
-    """
-    rpcholesky(kernel, data, rank=min(n, 50); atol=1e-8, block_size) -> (Matrix, Vector)
+"""
+    rpcholesky(kernel, data; rank=min(n, 50), rtol=0.05, atol=1e-8, block_size) -> (Matrix, Vector)
 
 Compute an Accelerated Randomly Pivoted Cholesky low-rank factor `G` such that
 `G * G' ≈ K`, where `K[i,j] = kernel(data[i,:], data[j,:])`. `data` may be
@@ -79,7 +79,8 @@ columns for rejected candidates.
 
 The algorithm stops when either:
 1. `k == rank` (requested rank is reached), **or**
-2. `tr(residual) ≤ atol` (residual trace falls below threshold due to numerical rank deficiency).
+2. `tr(residual) ≤ rtol * tr(K)` (the relative residual trace target is reached), **or**
+3. `tr(residual) ≤ atol` (the absolute residual trace cutoff is reached).
 
 Whichever happens first.
 
@@ -90,23 +91,23 @@ Whichever happens first.
 - `data`        : `n × d` row-indexable data collection (for example, a
                   matrix or `DataFrame`). Rows are passed to `kernel` as
                   `view(data, i, :)`.
-- `rank`        : optional maximum rank to compute (default: `min(n, 50)`).
+- `rank`        : maximum rank to compute (default: `min(n, 50)`).
+- `rtol`        : relative residual trace cutoff (default: `0.05`).
 - `atol`        : absolute residual trace cutoff (default: `1e-8`).
 - `block_size`  : candidates per block; defaults to `clamp(round(Int, sqrt(n)), 4, 24)`.
 
 # Returns
 A tuple `(G, pivots)` where:
-- `G` is an `n × rank` matrix whose element type matches the kernel
-  diagonal values. The first `length(pivots)` columns contain the low-rank factor,
-  and remaining columns are zero-padded if the algorithm stopped early due to `atol`.
+- `G` is an `n × k` matrix whose element type matches the kernel diagonal values,
+  where `k = length(pivots)` is the accepted rank.
 - `pivots` is an integer vector containing the global indices of the
-  accepted pivot rows. Its length is at most `rank`.
+  accepted pivot rows.
 
 # Example
 ```julia
 rbf(x, y) = exp(-sum((xi - yi)^2 for (xi, yi) in zip(x, y)) / 2)
-G, pivots = rpcholesky(rbf, X)      # Uses min(size(X, 1), 50)
-G, pivots = rpcholesky(rbf, X, 30)  # Uses rank 30
+G, pivots = rpcholesky(rbf, X)
+G, pivots = rpcholesky(rbf, X; rank=30, rtol=0.01)
 ```
 
 # References
@@ -114,13 +115,15 @@ Epperly et al. (2024), *Accelerated Randomly Pivoted Cholesky*, arXiv:2410.03969
 """
 function rpcholesky(
     kernel,
-    data,
-    rank = min(size(data, 1), 50);
+    data;
+    rank = min(size(data, 1), 50),
+    rtol = 0.05,
     atol = 1e-8,
-    block_size = clamp(round(Int, sqrt(size(data, 1))), 4, 24),
+    block_size = clamp(round(Int, sqrt(size(data, 1))), 4, 24)
 )
     Base.require_one_based_indexing(data)
     n = size(data, 1)
+    0 <= rtol < 1 || throw(ArgumentError("rtol must be in [0, 1)"))
     0 <= rank <= n || throw(ArgumentError("rank must be in [0, n]"))
     @inbounds trace_mass = kernel(view(data, 1, :), view(data, 1, :))
     d = Vector{typeof(trace_mass)}(undef, n)
@@ -130,13 +133,16 @@ function rpcholesky(
         d[i] = val
         trace_mass += val
     end
+    trace0 = trace_mass
     G = similar(d, n, rank)
     k = 0
     H = similar(d, block_size, block_size)
+    Gk = similar(d, block_size, rank)
     pivots = Int[]
     sizehint!(pivots, rank)
 
     while k < rank
+        trace_mass <= rtol * trace0 && break # relative tolerance satisfied
         trace_mass <= atol && break # rank deficiency (numerical zero)
 
         # Phase 1 — sample block_size candidates proportional to residual diagonal
@@ -153,9 +159,12 @@ function rpcholesky(
         # copy up, even though we don't need it, so that we can use BLAS for the Schur complement update
         LinearAlgebra.copytri!(H,'L')
 
-        Gk = G[idx, 1:k] # not a view since we need a contiguous block for BLAS
-        mul!(H, Gk, Gk', -one(eltype(H)), one(eltype(H))) # will use syrk! and copy if H is symmetric (but not a Symmetric type)
-
+        Gk[:, 1:k] .= G[idx, 1:k] # not a view since we need a contiguous block for BLAS
+        Gk_view = view(Gk, :, 1:k)
+        # will use syrk! and copy if H is symmetric (but not a Symmetric type).
+        # Strictly speaking, this is more than we need since we only need the lower triangle
+        # However, by not using BLAS directly we remain usable on non-BLAS numeric types
+        mul!(H, Gk_view, Gk_view', -one(eltype(H)), one(eltype(H)))
         # Phase 3 — rejection Cholesky on the b×b block (Algorithm 2.1)
         L, accepted = _block_pivot_cholesky!(H, rank - k, atol)
         r = length(accepted)
@@ -173,8 +182,8 @@ function rpcholesky(
                 G_new_cols[j, i] = kernel(view(data, j, :), xi)
             end
         end
-        Gk = G[global_idx, 1:k] # not a view since we need a contiguous block for BLAS
-        mul!(G_new_cols, view(G, :, 1:k), Gk', -one(eltype(G)), one(eltype(G)))
+        Gk[1:r,1:k] .= G[global_idx, 1:k] # not a view since we need a contiguous block for BLAS
+        mul!(G_new_cols, view(G, :, 1:k), view(Gk, 1:r, 1:k)', -one(eltype(G)), one(eltype(G))) # views are all still strided arrays and BLASable
         rdiv!(G_new_cols, L')
 
         # Phase 5 — update residual diagonal and residual trace mass
@@ -191,7 +200,9 @@ function rpcholesky(
 
         k += r
     end
-    @inbounds G[:, k+1:rank] .= zero(eltype(G))
+    if k < rank
+        G = G[:, 1:k]
+    end
     return G, pivots
 end
 
