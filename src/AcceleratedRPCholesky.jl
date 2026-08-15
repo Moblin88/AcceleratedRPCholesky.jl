@@ -46,7 +46,6 @@ function _block_pivot_cholesky!(H, max_accepted, abs_tol)
     Base.require_one_based_indexing(H)
     b = LinearAlgebra.checksquare(H)
     u = diag(H)
-    L_scratch = similar(H, b, b)
     accepted  = Int[]
     sizehint!(accepted, min(b, max_accepted))
 
@@ -56,19 +55,16 @@ function _block_pivot_cholesky!(H, max_accepted, abs_tol)
         hjj <= abs_tol && continue
         if rand() * u[j] < hjj
             push!(accepted, j)
-            lj = view(L_scratch, j:b, j)
-            lj .= view(H, j:b, j) ./ sqrt(hjj)
-            if j < b
-                lj_tail = view(L_scratch, j+1:b, j)
-                mul!(view(H, j+1:b, j+1:b), lj_tail, lj_tail', -one(eltype(H)), one(eltype(H)))
-            end
+            H[j:b,j] ./= sqrt(hjj)
+            lj_tail = view(H, j+1:b, j)
+            mul!(view(H, j+1:b, j+1:b), lj_tail, lj_tail', -one(eltype(H)), one(eltype(H)))
         end
     end
-    return LowerTriangular(L_scratch[accepted, accepted]), accepted
+    return LowerTriangular(H[accepted, accepted]), accepted
 end
 
-"""
-    rpcholesky(kernel, data; rank=n, rtol=0.05, atol=1e-8, block_size) -> Matrix
+    """
+    rpcholesky(kernel, data, rank=min(n, 50); atol=1e-8, block_size) -> (Matrix, Vector)
 
 Compute an Accelerated Randomly Pivoted Cholesky low-rank factor `G` such that
 `G * G' ≈ K`, where `K[i,j] = kernel(data[i,:], data[j,:])`. `data` may be
@@ -81,9 +77,11 @@ iterations. The acceleration comes from the block rejection sampling step
 (Algorithm 2.1 of Epperly et al., 2024), which avoids computing full kernel
 columns for rejected candidates.
 
-The algorithm stops when:
-1. `k == rank` (if `rank` is given), **or**
-2. `tr(residual) ≤ rtol × tr(K)`.
+The algorithm stops when either:
+1. `k == rank` (requested rank is reached), **or**
+2. `tr(residual) ≤ atol` (residual trace falls below threshold due to numerical rank deficiency).
+
+Whichever happens first.
 
 # Arguments
 - `kernel`      : callable `(xᵢ, xⱼ) -> scalar`. The scalar type is preserved
@@ -92,21 +90,23 @@ The algorithm stops when:
 - `data`        : `n × d` row-indexable data collection (for example, a
                   matrix or `DataFrame`). Rows are passed to `kernel` as
                   `view(data, i, :)`.
-- `rank`        : maximum rank (default: `n`).
-- `rtol`        : relative trace tolerance (default: `0.05`).
+- `rank`        : optional maximum rank to compute (default: `min(n, 50)`).
 - `atol`        : absolute residual trace cutoff (default: `1e-8`).
-- `block_size`  : candidates per block; defaults to `clamp(round(Int, sqrt(n)), 4, 256)`.
+- `block_size`  : candidates per block; defaults to `clamp(round(Int, sqrt(n)), 4, 24)`.
 
 # Returns
-An `n × k` matrix `G` whose element type matches the kernel diagonal values,
-such that `G * G'` approximates the kernel matrix. The number of columns is
-at most `rank` and may be smaller when either tolerance is reached.
+A tuple `(G, pivots)` where:
+- `G` is an `n × rank` matrix whose element type matches the kernel
+  diagonal values. The first `length(pivots)` columns contain the low-rank factor,
+  and remaining columns are zero-padded if the algorithm stopped early due to `atol`.
+- `pivots` is an integer vector containing the global indices of the
+  accepted pivot rows. Its length is at most `rank`.
 
 # Example
 ```julia
-rbf(x, y) = exp(-sum((x .- y).^2) / 2)
-G = rpcholesky(rbf, X; rank=30, rtol=0.05)
-approx = G * G'
+rbf(x, y) = exp(-sum((xi - yi)^2 for (xi, yi) in zip(x, y)) / 2)
+G, pivots = rpcholesky(rbf, X)      # Uses min(size(X, 1), 50)
+G, pivots = rpcholesky(rbf, X, 30)  # Uses rank 30
 ```
 
 # References
@@ -114,64 +114,55 @@ Epperly et al. (2024), *Accelerated Randomly Pivoted Cholesky*, arXiv:2410.03969
 """
 function rpcholesky(
     kernel,
-    data;
-    rank = size(data, 1),
-    rtol = 0.05,
+    data,
+    rank = min(size(data, 1), 50);
     atol = 1e-8,
-    block_size = clamp(round(Int, sqrt(size(data, 1))), 4, 256),
+    block_size = clamp(round(Int, sqrt(size(data, 1))), 4, 24),
 )
     Base.require_one_based_indexing(data)
     n = size(data, 1)
-    max_rank = min(rank, n)
-
-    # Residual diagonal: d[i] = K[i,i] = kernel(xᵢ, xᵢ)
-    d = [kernel(view(data, i, :), view(data, i, :)) for i in 1:n]
-
-    trace_mass = trace0 = sum(d)
-
-    G = similar(d, n, min(block_size * 2, max_rank))
+    0 <= rank <= n || throw(ArgumentError("rank must be in [0, n]"))
+    @inbounds trace_mass = kernel(view(data, 1, :), view(data, 1, :))
+    d = Vector{typeof(trace_mass)}(undef, n)
+    @inbounds d[1] = trace_mass
+    @inbounds for i in 2:n
+        val = kernel(view(data, i, :), view(data, i, :))
+        d[i] = val
+        trace_mass += val
+    end
+    G = similar(d, n, rank)
     k = 0
-    H_buf = similar(d, block_size, block_size)
+    H = similar(d, block_size, block_size)
+    pivots = Int[]
+    sizehint!(pivots, rank)
 
-    while true
-        k == max_rank && break # reached maximum rank
-        trace_mass <= rtol * trace0 && break # explained enough trace mass
+    while k < rank
         trace_mass <= atol && break # rank deficiency (numerical zero)
 
-        b = min(block_size, n - k)
+        # Phase 1 — sample block_size candidates proportional to residual diagonal
+        idx = sample(1:n, d, block_size)
 
-        # Phase 1 — sample b candidates proportional to residual diagonal
-        idx = sample(1:n, d, b)
-
-        # Phase 2 — form b×b residual submatrix H = K[idx,idx] - G[idx,1:k]*G[idx,1:k]'
-        # Fill lower triangle only (kernel is symmetric), then mirror
-        H = view(H_buf, 1:b, 1:b)
-        @inbounds for j in 1:b
+        # Phase 2 — form block_size×block_size residual submatrix H = K[idx,idx] - G[idx,1:k]*G[idx,1:k]'
+        # Fill lower triangle only
+        @inbounds for j in 1:block_size
             xj = view(data, idx[j], :)
-            for i in j:b
+            for i in j:block_size
                 H[i, j] = kernel(view(data, idx[i], :), xj)
             end
         end
-        LinearAlgebra.copytri!(H, 'L')
+        # copy up, even though we don't need it, so that we can use BLAS for the Schur complement update
+        LinearAlgebra.copytri!(H,'L')
 
         Gk = G[idx, 1:k] # not a view since we need a contiguous block for BLAS
-        mul!(H, Gk, Gk', -true, true)
+        mul!(H, Gk, Gk', -one(eltype(H)), one(eltype(H))) # will use syrk! and copy if H is symmetric (but not a Symmetric type)
 
         # Phase 3 — rejection Cholesky on the b×b block (Algorithm 2.1)
-        L, accepted = _block_pivot_cholesky!(H, max_rank - k, atol)
+        L, accepted = _block_pivot_cholesky!(H, rank - k, atol)
         r = length(accepted)
         r == 0 && continue
 
         global_idx = idx[accepted]
-
-        # Grow G if nesessary
-        # try to estimate how long until we reach r_tol * trace0
-        if k + r > size(G, 2)
-            new_cap       = clamp(ceil(Int, k * trace0 * (1-rtol) / (trace0 - trace_mass)), k+r, max_rank)
-            G_new         = similar(G, n, new_cap)
-            G_new[:, 1:k] .= G[:, 1:k]
-            G             = G_new
-        end
+        append!(pivots, global_idx)
 
         # Phase 4 — fill new columns, subtract prior contribution, solve in-place
         # G[:, k+1:k+r] * L' = K[:, global_idx] - G[:,1:k] * G[global_idx,1:k]'
@@ -182,11 +173,12 @@ function rpcholesky(
                 G_new_cols[j, i] = kernel(view(data, j, :), xi)
             end
         end
-        mul!(G_new_cols, view(G, :, 1:k), G[global_idx, 1:k]', -one(eltype(G)), one(eltype(G)))
+        Gk = G[global_idx, 1:k] # not a view since we need a contiguous block for BLAS
+        mul!(G_new_cols, view(G, :, 1:k), Gk', -one(eltype(G)), one(eltype(G)))
         rdiv!(G_new_cols, L')
 
         # Phase 5 — update residual diagonal and residual trace mass
-        trace_mass = 0.0
+        trace_mass = zero(trace_mass)
         @inbounds for i in 1:n
             dᵢ = d[i]
             for l in 1:r
@@ -199,8 +191,8 @@ function rpcholesky(
 
         k += r
     end
-
-    return G[:, 1:k]
+    @inbounds G[:, k+1:rank] .= zero(eltype(G))
+    return G, pivots
 end
 
 end # module AcceleratedRPCholesky
