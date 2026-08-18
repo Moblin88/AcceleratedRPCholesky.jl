@@ -24,16 +24,15 @@ using Random
 
 export rpcholesky
 
-function sample(items, weights, count)
-    selected = similar(items, count)
-    cum_weights = cumsum(weights)
+function sample!(selected, cum_weights, weights, rng)
+    cumsum!(cum_weights, weights)
     total_weight = last(cum_weights)
     for i in eachindex(selected)
-        r = rand() * total_weight
+        r = rand(rng) * total_weight
         idx = searchsortedfirst(cum_weights, r)
-        selected[i] = @inbounds items[idx]
+        selected[i] = idx
     end
-    return selected
+    return nothing
 end
 
 # Algorithm 2.1 from Epperly et al. (2024).
@@ -41,30 +40,41 @@ end
 # u = diag(H) is frozen at entry as the acceptance envelope; pivot j is
 # accepted with probability H[j,j] / u[j]. On acceptance, H is deflated by
 # the Schur complement; on rejection, H is left unchanged.
-# Returns the r×r lower-triangular Cholesky factor L and the accepted local indices.
-function _block_pivot_cholesky!(H, max_accepted, abs_tol)
+# Returns the r×r lower-triangular Cholesky factor L and accepted count r.
+function _block_pivot_cholesky!(H, idx, max_accepted, abs_tol, u, rng = Random.default_rng())
     Base.require_one_based_indexing(H)
     b = LinearAlgebra.checksquare(H)
-    u = diag(H)
-    accepted  = Int[]
-    sizehint!(accepted, min(b, max_accepted))
+    @inbounds for i in 1:b
+        u[i] = H[i, i]
+    end
+    r = 0
 
     @inbounds for j in 1:b
-        length(accepted) == max_accepted && break
+        r == max_accepted && break
         hjj = H[j, j]
-        hjj <= abs_tol && continue
-        if rand() * u[j] < hjj
-            push!(accepted, j)
-            H[j:b,j] ./= sqrt(hjj)
-            lj_tail = view(H, j+1:b, j)
-            mul!(view(H, j+1:b, j+1:b), lj_tail, lj_tail', -one(eltype(H)), one(eltype(H)))
+        if hjj > abs_tol && rand(rng) * u[j] < hjj
+            r += 1
+            idx[r] = idx[j]
+            sqrt_hjj = sqrt(hjj)
+            H[r,r] = sqrt_hjj
+            inv_sqrt_hjj = inv(sqrt_hjj)
+            lj_tail = view(H, j+1:b, r)
+            mul!(lj_tail, view(H, j+1:b, j), inv_sqrt_hjj)
+            mul!(view(H, j+1:b, j+1:b), lj_tail, lj_tail', -one(eltype(H)), one(eltype(H))) #should use syrk! and an (unneeded) copy
+            if r < j
+                for y in 1:r-1
+                    H[r, y] = H[j, y]
+                end
+            end
         end
     end
-    return LowerTriangular(H[accepted, accepted]), accepted
+
+    return LowerTriangular(view(H, 1:r, 1:r)), r
 end
 
 """
-    rpcholesky(kernel, data; rank=min(n, 50), rtol=0.05, atol=1e-8, block_size) -> (Matrix, Vector)
+    rpcholesky(kernel, data, [Val(true)];
+               rank=min(n, 50), rtol=0.05, atol=1e-8, block_size, rng=Random.default_rng())
 
 Compute an Accelerated Randomly Pivoted Cholesky low-rank factor `G` such that
 `G * G' ≈ K`, where `K[i,j] = kernel(data[i,:], data[j,:])`. `data` may be
@@ -95,19 +105,28 @@ Whichever happens first.
 - `rtol`        : relative residual trace cutoff (default: `0.05`).
 - `atol`        : absolute residual trace cutoff (default: `1e-8`).
 - `block_size`  : candidates per block; defaults to `clamp(round(Int, sqrt(n)), 4, 24)`.
+- `rng`         : random number generator used for both candidate sampling and
+                  rejection sampling (default: `Random.default_rng()`).
+
+# Memory note
+`rpcholesky` allocates storage for up to `rank` columns of `G` up front
+(`n × rank`), then truncates to the accepted rank `k` on return. Choose large
+`rank` values with care: allocation cost is paid even if stopping triggers
+early from `rtol` or `atol`.
 
 # Returns
-A tuple `(G, pivots)` where:
-- `G` is an `n × k` matrix whose element type matches the kernel diagonal values,
-  where `k = length(pivots)` is the accepted rank.
-- `pivots` is an integer vector containing the global indices of the
-  accepted pivot rows.
+- `rpcholesky(kernel, data; ...)` returns `G`, an `n × k` matrix whose element
+  type matches the kernel diagonal values.
+- `rpcholesky(kernel, data, Val(true); ...)` returns `(G, pivots)`, where
+  `pivots` is an integer vector containing the global indices of the accepted
+  pivot rows and `k = length(pivots)`.
 
 # Example
 ```julia
 rbf(x, y) = exp(-sum((xi - yi)^2 for (xi, yi) in zip(x, y)) / 2)
-G, pivots = rpcholesky(rbf, X)
-G, pivots = rpcholesky(rbf, X; rank=30, rtol=0.01)
+G = rpcholesky(rbf, X)
+G = rpcholesky(rbf, X; rank=30, rtol=0.01)
+G, pivots = rpcholesky(rbf, X, Val(true); rank=30, rtol=0.01)
 ```
 
 # References
@@ -115,12 +134,14 @@ Epperly et al. (2024), *Accelerated Randomly Pivoted Cholesky*, arXiv:2410.03969
 """
 function rpcholesky(
     kernel,
-    data;
+    data,
+    ::Val{P} = Val(false);
     rank = min(size(data, 1), 50),
     rtol = 0.05,
     atol = 1e-8,
-    block_size = clamp(round(Int, sqrt(size(data, 1))), 4, 24)
-)
+    block_size = clamp(round(Int, sqrt(size(data, 1))), 4, 24),
+    rng = Random.default_rng()
+) where {P}
     Base.require_one_based_indexing(data)
     n = size(data, 1)
     0 <= rtol < 1 || throw(ArgumentError("rtol must be in [0, 1)"))
@@ -138,15 +159,20 @@ function rpcholesky(
     k = 0
     H = similar(d, block_size, block_size)
     Gk = similar(d, block_size, rank)
-    pivots = Int[]
-    sizehint!(pivots, rank)
+    idx = Vector{Int}(undef, block_size)
+    u = Vector{eltype(H)}(undef, block_size)
+    cum_weights = similar(d)
+    pivots = P ? Int[] : nothing
+    # Keep this in the pivot-returning specialization only; an unconditional
+    # sizehint! is effectful and not eliminated in the Val(false) path.
+    P && sizehint!(pivots, rank)
 
     while k < rank
         trace_mass <= rtol * trace0 && break # relative tolerance satisfied
         trace_mass <= atol && break # rank deficiency (numerical zero)
 
         # Phase 1 — sample block_size candidates proportional to residual diagonal
-        idx = sample(1:n, d, block_size)
+        sample!(idx, cum_weights, d, rng)
 
         # Phase 2 — form block_size×block_size residual submatrix H = K[idx,idx] - G[idx,1:k]*G[idx,1:k]'
         # Fill lower triangle only
@@ -166,23 +192,22 @@ function rpcholesky(
         # However, by not using BLAS directly we remain usable on non-BLAS numeric types
         mul!(H, Gk_view, Gk_view', -one(eltype(H)), one(eltype(H)))
         # Phase 3 — rejection Cholesky on the b×b block (Algorithm 2.1)
-        L, accepted = _block_pivot_cholesky!(H, rank - k, atol)
-        r = length(accepted)
+        L, r = _block_pivot_cholesky!(H, idx, rank - k, atol, u, rng)
         r == 0 && continue
 
-        global_idx = idx[accepted]
-        append!(pivots, global_idx)
+        global_idx_view = view(idx, 1:r)
+        P && append!(pivots, global_idx_view)
 
         # Phase 4 — fill new columns, subtract prior contribution, solve in-place
         # G[:, k+1:k+r] * L' = K[:, global_idx] - G[:,1:k] * G[global_idx,1:k]'
         G_new_cols = view(G, :, k+1:k+r)
-        @inbounds for i in eachindex(global_idx)
-            xi = view(data, global_idx[i], :)
+        @inbounds for i in 1:r
+            xi = view(data, global_idx_view[i], :)
             for j in 1:n
                 G_new_cols[j, i] = kernel(view(data, j, :), xi)
             end
         end
-        Gk[1:r,1:k] .= G[global_idx, 1:k] # not a view since we need a contiguous block for BLAS
+        Gk[1:r,1:k] .= G[global_idx_view, 1:k] # not a view since we need a contiguous block for BLAS
         mul!(G_new_cols, view(G, :, 1:k), view(Gk, 1:r, 1:k)', -one(eltype(G)), one(eltype(G))) # views are all still strided arrays and BLASable
         rdiv!(G_new_cols, L')
 
@@ -203,7 +228,11 @@ function rpcholesky(
     if k < rank
         G = G[:, 1:k]
     end
-    return G, pivots
+    if P
+        return G, pivots
+    else
+        return G
+    end
 end
 
 end # module AcceleratedRPCholesky
