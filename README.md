@@ -12,7 +12,7 @@ For data rows `xᵢ`, `K` denotes the `n × n` kernel matrix with
 
 ```julia
 using Pkg
-Pkg.add(url="https://github.com/Moblin88/AcceleratedRPCholesky.jl")
+Pkg.add("AcceleratedRPCholesky")
 ```
 
 ## Quick Start
